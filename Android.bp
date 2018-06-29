@@ -38,19 +38,9 @@ cc_library_host_static {
     name: "libaidl-common",
     defaults: ["aidl_defaults"],
 
-    clang_cflags: [
+    cflags: [
         // Tragically, the code is riddled with unused parameters.
         "-Wno-unused-parameter",
-
-        // yacc dumps a lot of code *just in case*.
-        "-Wno-unused-function",
-        "-Wno-unneeded-internal-declaration",
-
-        // yacc is a tool from a more civilized age.
-        "-Wno-deprecated-register",
-
-        // yacc also has a habit of using char* over const char*.
-        "-Wno-writable-strings",
     ],
 
     srcs: [
@@ -200,4 +190,34 @@ cc_binary {
         "tests/aidl_test_client_utf8_strings.cpp",
         "tests/aidl_test_client_service_exceptions.cpp",
     ],
+}
+
+android_app {
+    name: "aidl_test_services",
+    platform_apis: true,
+    // Turn off Java optimization tools to speed up our test iterations.
+    optimize: {
+        enabled: false,
+    },
+    dex_preopt: {
+        enabled: false,
+    },
+    certificate: "platform",
+    manifest: "tests/java_app/AndroidManifest.xml",
+    resource_dirs: ["tests/java_app/resources"],
+    srcs: [
+        "tests/android/aidl/tests/INamedCallback.aidl",
+        "tests/android/aidl/tests/ITestService.aidl",
+        "tests/java_app/src/android/aidl/tests/NullableTests.java",
+        "tests/java_app/src/android/aidl/tests/SimpleParcelable.java",
+        "tests/java_app/src/android/aidl/tests/TestFailException.java",
+        "tests/java_app/src/android/aidl/tests/TestLogger.java",
+        "tests/java_app/src/android/aidl/tests/TestServiceClient.java",
+    ],
+    aidl: {
+        include_dirs: [
+            "system/tools/aidl/tests/",
+            "frameworks/native/aidl/binder",
+        ],
+    },
 }

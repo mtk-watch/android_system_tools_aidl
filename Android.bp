@@ -38,11 +38,6 @@ cc_library_host_static {
     name: "libaidl-common",
     defaults: ["aidl_defaults"],
 
-    cflags: [
-        // Tragically, the code is riddled with unused parameters.
-        "-Wno-unused-parameter",
-    ],
-
     srcs: [
         "aidl.cpp",
         "aidl_language.cpp",
@@ -97,8 +92,7 @@ cc_test_host {
         "-g",
         "-DUNIT_TEST",
     ],
-    // Tragically, the code is riddled with unused parameters.
-    clang_cflags: ["-Wno-unused-parameter"],
+
     srcs: [
         "aidl_unittest.cpp",
         "ast_cpp_unittest.cpp",
@@ -135,7 +129,6 @@ cc_binary {
         "-Wall",
         "-Wextra",
         "-Werror",
-        "-Wunused-parameter",
     ],
 }
 
@@ -145,7 +138,6 @@ cc_defaults {
         "-Wall",
         "-Wextra",
         "-Werror",
-        "-Wunused-parameter",
     ],
     shared_libs: [
         "libbase",
@@ -166,6 +158,7 @@ cc_library_shared {
     srcs: [
         "tests/android/aidl/tests/ITestService.aidl",
         "tests/android/aidl/tests/INamedCallback.aidl",
+        "tests/android/aidl/tests/StructuredParcelable.aidl",
         "tests/simple_parcelable.cpp",
     ],
 }
@@ -208,6 +201,7 @@ android_app {
     srcs: [
         "tests/android/aidl/tests/INamedCallback.aidl",
         "tests/android/aidl/tests/ITestService.aidl",
+        "tests/android/aidl/tests/StructuredParcelable.aidl",
         "tests/java_app/src/android/aidl/tests/NullableTests.java",
         "tests/java_app/src/android/aidl/tests/SimpleParcelable.java",
         "tests/java_app/src/android/aidl/tests/TestFailException.java",

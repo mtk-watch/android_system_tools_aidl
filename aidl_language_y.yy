@@ -1,6 +1,7 @@
 %{
 #include "aidl_language.h"
 #include "aidl_language_y.h"
+#include <map>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,7 +16,10 @@ int yylex(yy::parser::semantic_type *, yy::parser::location_type *, void *);
 %lex-param { void *lex_scanner }
 
 %pure-parser
+%glr-parser
 %skeleton "glr.cc"
+
+%expect-rr 0
 
 %error-verbose
 
@@ -30,6 +34,8 @@ int yylex(yy::parser::semantic_type *, yy::parser::location_type *, void *);
     AidlArgument* arg;
     AidlArgument::Direction direction;
     std::vector<std::unique_ptr<AidlArgument>>* arg_list;
+    AidlVariableDeclaration* variable;
+    std::vector<std::unique_ptr<AidlVariableDeclaration>>* variable_list;
     AidlMethod* method;
     AidlMember* constant;
     std::vector<std::unique_ptr<AidlMember>>* members;
@@ -40,15 +46,17 @@ int yylex(yy::parser::semantic_type *, yy::parser::location_type *, void *);
 }
 
 %token<token> IDENTIFIER INTERFACE ONEWAY C_STR HEXVALUE
+%token<token> ANNOTATION "annotation"
 %token<integer> INTVALUE
 
 %token '(' ')' ',' '=' '[' ']' '<' '>' '.' '{' '}' ';'
 %token UNKNOWN "unrecognized character"
 %token IN OUT INOUT PACKAGE IMPORT PARCELABLE CPP_HEADER CONST INT STRING
-%token ANNOTATION_NULLABLE ANNOTATION_UTF8 ANNOTATION_UTF8_CPP
 
 %type<parcelable_list> parcelable_decls
 %type<parcelable> parcelable_decl
+%type<variable_list> variable_decls
+%type<variable> variable_decl
 %type<members> members
 %type<interface_obj> interface_decl
 %type<method> method_decl
@@ -116,6 +124,7 @@ parcelable_decls
   { $$ = new AidlDocument(); }
  | parcelable_decls parcelable_decl {
    $$ = $1;
+
    $$->AddParcelable($2);
   }
  | parcelable_decls error {
@@ -130,10 +139,33 @@ parcelable_decl
  | PARCELABLE qualified_name CPP_HEADER C_STR ';' {
     $$ = new AidlParcelable($2, @2.begin.line, ps->Package(), $4->GetText());
   }
+ | PARCELABLE identifier '{' variable_decls '}' {
+    AidlQualifiedName* name = new AidlQualifiedName($2->GetText(), $2->GetComments());
+    $$ = new AidlStructuredParcelable(name, @2.begin.line, ps->Package(), $4);
+ }
  | PARCELABLE error ';' {
     ps->AddError();
     $$ = NULL;
   };
+
+variable_decls
+ : /* empty */ {
+    $$ = new std::vector<std::unique_ptr<AidlVariableDeclaration>>; }
+ | variable_decls variable_decl {
+    $$ = $1;
+    if ($2 != nullptr) {
+      $$->push_back(std::unique_ptr<AidlVariableDeclaration>($2));
+    }
+ };
+
+variable_decl
+ : type identifier ';' {
+   $$ = new AidlVariableDeclaration($1, $2->GetText(), @2.begin.line);
+ }
+ | error ';' {
+   ps->AddError();
+   $$ = nullptr;
+ }
 
 interface_decl
  : annotation_list INTERFACE identifier '{' members '}' {
@@ -272,17 +304,34 @@ generic_list
 
 annotation_list
  :
-  { $$ = AidlType::AnnotationNone; }
+  { $$ = AidlAnnotatable::AnnotationNone; }
  | annotation_list annotation
-  { $$ = static_cast<AidlType::Annotation>($1 | $2); };
+  { $$ = static_cast<AidlAnnotatable::Annotation>($1 | $2); };
 
 annotation
- : ANNOTATION_NULLABLE
-  { $$ = AidlType::AnnotationNullable; }
- | ANNOTATION_UTF8
-  { $$ = AidlType::AnnotationUtf8; }
- | ANNOTATION_UTF8_CPP
-  { $$ = AidlType::AnnotationUtf8InCpp; };
+ : ANNOTATION
+  { static const std::map<std::string, AidlAnnotatable::Annotation> kAnnotations = {
+      { "nullable", AidlAnnotatable::AnnotationNullable },
+      { "utf8", AidlAnnotatable::AnnotationUtf8 },
+      { "utf8InCpp", AidlAnnotatable::AnnotationUtf8InCpp },
+    };
+
+    auto it = kAnnotations.find($1->GetText());
+    if (it == kAnnotations.end()) {
+      std::cerr << ps->FileName() << ":" << @1 << ": '" << $1->GetText()
+                << "' is not a recognized annotation. It must be one of:";
+      for (const auto& kv : kAnnotations) {
+        std::cerr << " " << kv.first;
+      }
+      std::cerr << "." << std::endl;
+
+      ps->AddError();
+      $$ = AidlAnnotatable::AnnotationNone;
+    } else {
+      $$ = it->second;
+    }
+
+  };
 
 direction
  : IN

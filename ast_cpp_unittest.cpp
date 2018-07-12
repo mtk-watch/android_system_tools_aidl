@@ -95,8 +95,7 @@ class AstCppTests : public ::testing::Test {
   void CompareGeneratedCode(const AstNode& node,
                             const string& expected_output) {
     string actual_output;
-    CodeWriterPtr writer = GetStringWriter(&actual_output);
-    node.Write(writer.get());
+    node.Write(CodeWriter::ForString(&actual_output).get());
     EXPECT_EQ(expected_output, actual_output);
   }
 };  // class AstCppTests
@@ -239,6 +238,16 @@ TEST_F(AstCppTests, GeneratesMethodImpl) {
   b->AddLiteral("foo");
   b->AddLiteral("bar");
   CompareGeneratedCode(m, kExpectedMethodImplOutput);
+}
+
+TEST_F(AstCppTests, ToString) {
+  std::string literal = "void foo() {}";
+  LiteralDecl decl(literal);
+  std::string actual = decl.ToString();
+  EXPECT_EQ(literal, actual);
+  std::string written;
+  decl.Write(CodeWriter::ForString(&written).get());
+  EXPECT_EQ(literal, written);
 }
 
 }  // namespace cpp

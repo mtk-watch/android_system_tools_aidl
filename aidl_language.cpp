@@ -1,16 +1,24 @@
 #include "aidl_language.h"
+#include "aidl_typenames.h"
 
-#include <iostream>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <algorithm>
+#include <cassert>
+#include <iostream>
+#include <set>
+#include <sstream>
 #include <string>
+#include <utility>
 
 #include <android-base/parseint.h>
 #include <android-base/strings.h>
 
 #include "aidl_language_y.h"
 #include "logging.h"
+#include "type_java.h"
+#include "type_namespace.h"
 
 #ifdef _WIN32
 int isatty(int  fd)
@@ -24,8 +32,11 @@ using android::base::Join;
 using android::base::Split;
 using std::cerr;
 using std::endl;
+using std::pair;
+using std::set;
 using std::string;
 using std::unique_ptr;
+using std::vector;
 
 void yylex_init(void **);
 void yylex_destroy(void *);
@@ -38,38 +49,122 @@ AidlToken::AidlToken(const std::string& text, const std::string& comments)
     : text_(text),
       comments_(comments) {}
 
-AidlType::AidlType(const std::string& name, unsigned line,
-                   const std::string& comments, bool is_array)
-    : name_(name),
-      line_(line),
-      is_array_(is_array),
-      comments_(comments) {}
+static const string kNullable("nullable");
+static const string kUtf8("utf8");
+static const string kUtf8InCpp("utf8InCpp");
 
-string AidlType::ToString() const {
-  return name_ + (is_array_ ? "[]" : "");
+static const set<string> kAnnotationNames{kNullable, kUtf8, kUtf8InCpp};
+
+AidlAnnotation::AidlAnnotation(const string& name, string& error) : name_(name) {
+  if (kAnnotationNames.find(name_) == kAnnotationNames.end()) {
+    std::ostringstream stream;
+    stream << "'" << name_ << "' is not a recognized annotation. ";
+    stream << "It must be one of:";
+    for (const string& kv : kAnnotationNames) {
+      stream << " " << kv;
+    }
+    stream << ".";
+    error = stream.str();
+  }
 }
 
-AidlVariableDeclaration::AidlVariableDeclaration(AidlType* type, std::string name, unsigned line)
+static bool HasAnnotation(const set<unique_ptr<AidlAnnotation>>& annotations, const string& name) {
+  for (const auto& a : annotations) {
+    if (a->GetName() == name) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool AidlAnnotatable::IsNullable() const {
+  return HasAnnotation(annotations_, kNullable);
+}
+
+bool AidlAnnotatable::IsUtf8() const {
+  return HasAnnotation(annotations_, kUtf8);
+}
+
+bool AidlAnnotatable::IsUtf8InCpp() const {
+  return HasAnnotation(annotations_, kUtf8InCpp);
+}
+
+string AidlAnnotatable::ToString() const {
+  vector<string> ret;
+  for (const auto& a : annotations_) {
+    ret.emplace_back(a->ToString());
+  }
+  std::sort(ret.begin(), ret.end());
+  return Join(ret, " ");
+}
+
+AidlTypeSpecifier::AidlTypeSpecifier(const string& unresolved_name, bool is_array,
+                                     vector<unique_ptr<AidlTypeSpecifier>>* type_params,
+                                     unsigned line, const string& comments)
+    : unresolved_name_(unresolved_name),
+      is_array_(is_array),
+      type_params_(type_params),
+      line_(line),
+      comments_(comments) {}
+
+string AidlTypeSpecifier::ToString() const {
+  string ret = GetName();
+  if (IsGeneric()) {
+    vector<string> arg_names;
+    for (const auto& ta : GetTypeParameters()) {
+      arg_names.emplace_back(ta->ToString());
+    }
+    ret += "<" + Join(arg_names, ",") + ">";
+  }
+  if (IsArray()) {
+    ret += "[]";
+  }
+  return ret;
+}
+
+string AidlTypeSpecifier::Signature() const {
+  string ret = ToString();
+  string annotations = AidlAnnotatable::ToString();
+  if (annotations != "") {
+    ret = annotations + " " + ret;
+  }
+  return ret;
+}
+
+bool AidlTypeSpecifier::Resolve(android::aidl::AidlTypenames& typenames) {
+  assert(!IsResolved());
+  pair<string, bool> result = typenames.ResolveTypename(unresolved_name_);
+  if (result.second) {
+    fully_qualified_name_ = result.first;
+  }
+  return result.second;
+}
+
+AidlVariableDeclaration::AidlVariableDeclaration(AidlTypeSpecifier* type, std::string name,
+                                                 unsigned line)
     : type_(type), name_(name), line_(line) {}
 
 string AidlVariableDeclaration::ToString() const {
   return type_->ToString() + " " + name_;
 }
 
-AidlArgument::AidlArgument(AidlArgument::Direction direction, AidlType* type, std::string name,
-                           unsigned line)
+string AidlVariableDeclaration::Signature() const {
+  return type_->Signature() + " " + name_;
+}
+
+AidlArgument::AidlArgument(AidlArgument::Direction direction, AidlTypeSpecifier* type,
+                           std::string name, unsigned line)
     : AidlVariableDeclaration(type, name, line),
       direction_(direction),
       direction_specified_(true) {}
 
-AidlArgument::AidlArgument(AidlType* type, std::string name, unsigned line)
+AidlArgument::AidlArgument(AidlTypeSpecifier* type, std::string name, unsigned line)
     : AidlVariableDeclaration(type, name, line),
       direction_(AidlArgument::IN_DIR),
       direction_specified_(false) {}
 
-string AidlArgument::ToString() const {
+string AidlArgument::GetDirectionSpecifier() const {
   string ret;
-
   if (direction_specified_) {
     switch(direction_) {
     case AidlArgument::IN_DIR:
@@ -83,10 +178,15 @@ string AidlArgument::ToString() const {
       break;
     }
   }
-
-  ret += AidlVariableDeclaration::ToString();
-
   return ret;
+}
+
+string AidlArgument::ToString() const {
+  return GetDirectionSpecifier() + AidlVariableDeclaration::ToString();
+}
+
+std::string AidlArgument::Signature() const {
+  return GetDirectionSpecifier() + AidlVariableDeclaration::Signature();
 }
 
 AidlIntConstant::AidlIntConstant(std::string name, int32_t value)
@@ -130,9 +230,9 @@ AidlStringConstant::AidlStringConstant(std::string name,
   }
 }
 
-AidlMethod::AidlMethod(bool oneway, AidlType* type, std::string name,
-                       std::vector<std::unique_ptr<AidlArgument>>* args,
-                       unsigned line, const std::string& comments, int id)
+AidlMethod::AidlMethod(bool oneway, AidlTypeSpecifier* type, std::string name,
+                       std::vector<std::unique_ptr<AidlArgument>>* args, unsigned line,
+                       const std::string& comments, int id)
     : oneway_(oneway),
       comments_(comments),
       type_(type),
@@ -148,23 +248,29 @@ AidlMethod::AidlMethod(bool oneway, AidlType* type, std::string name,
   }
 }
 
-AidlMethod::AidlMethod(bool oneway, AidlType* type, std::string name,
-                       std::vector<std::unique_ptr<AidlArgument>>* args,
-                       unsigned line, const std::string& comments)
+AidlMethod::AidlMethod(bool oneway, AidlTypeSpecifier* type, std::string name,
+                       std::vector<std::unique_ptr<AidlArgument>>* args, unsigned line,
+                       const std::string& comments)
     : AidlMethod(oneway, type, name, args, line, comments, 0) {
   has_id_ = false;
 }
 
-Parser::Parser(const IoDelegate& io_delegate)
-    : io_delegate_(io_delegate) {
+string AidlMethod::Signature() const {
+  vector<string> arg_signatures;
+  for (const auto& arg : GetArguments()) {
+    arg_signatures.emplace_back(arg->Signature());
+  }
+  return GetType().Signature() + " " + GetName() + "(" + Join(arg_signatures, ", ") + ")";
+}
+
+Parser::Parser(const IoDelegate& io_delegate, android::aidl::AidlTypenames* typenames)
+    : io_delegate_(io_delegate), typenames_(typenames) {
   yylex_init(&scanner_);
 }
 
-AidlDefinedType::AidlDefinedType(std::string name, unsigned line,
-                                 const std::string& comments,
+AidlDefinedType::AidlDefinedType(std::string name, unsigned line, const std::string& comments,
                                  const std::vector<std::string>& package)
-    : AidlType(name, line, comments, false /*is_array*/),
-      package_(package) {}
+    : name_(name), line_(line), comments_(comments), package_(package) {}
 
 std::string AidlDefinedType::GetPackage() const {
   return Join(package_, '.');
@@ -189,10 +295,24 @@ AidlParcelable::AidlParcelable(AidlQualifiedName* name, unsigned line,
   }
 }
 
+void AidlParcelable::Write(CodeWriter* writer) const {
+  writer->Write("parcelable %s ;\n", GetName().c_str());
+}
+
 AidlStructuredParcelable::AidlStructuredParcelable(
     AidlQualifiedName* name, unsigned line, const std::vector<std::string>& package,
     std::vector<std::unique_ptr<AidlVariableDeclaration>>* variables)
     : AidlParcelable(name, line, package, "" /*cpp_header*/), variables_(std::move(*variables)) {}
+
+void AidlStructuredParcelable::Write(CodeWriter* writer) const {
+  writer->Write("parcelable %s {\n", GetName().c_str());
+  writer->Indent();
+  for (const auto& field : GetFields()) {
+    writer->Write("%s;\n", field->Signature().c_str());
+  }
+  writer->Dedent();
+  writer->Write("}\n");
+}
 
 AidlInterface::AidlInterface(const std::string& name, unsigned line,
                              const std::string& comments, bool oneway,
@@ -218,6 +338,16 @@ AidlInterface::AidlInterface(const std::string& name, unsigned line,
   }
 
   delete members;
+}
+
+void AidlInterface::Write(CodeWriter* writer) const {
+  writer->Write("interface %s {\n", GetName().c_str());
+  writer->Indent();
+  for (const auto& method : GetMethods()) {
+    writer->Write("%s;\n", method->Signature().c_str());
+  }
+  writer->Dedent();
+  writer->Write("}\n");
 }
 
 AidlDefinedType* AidlDocument::ReleaseDefinedType() {
@@ -293,11 +423,11 @@ bool Parser::ParseFile(const string& filename) {
   if (yy::parser(this).parse() != 0 || error_ != 0)
     return false;
 
-  if (document_.get() != nullptr)
-    return true;
-
-  LOG(ERROR) << "Parser succeeded but yielded no document!";
-  return false;
+  if (document_.get() == nullptr) {
+    LOG(ERROR) << "Parser succeeded but yielded no document!";
+    return false;
+  }
+  return true;
 }
 
 std::vector<std::string> Parser::Package() const {
@@ -311,4 +441,17 @@ void Parser::AddImport(AidlQualifiedName* name, unsigned line) {
   imports_.emplace_back(new AidlImport(this->FileName(),
                                        name->GetDotName(), line));
   delete name;
+}
+
+bool Parser::Resolve() {
+  bool success = true;
+  for (AidlTypeSpecifier* typespec : unresolved_typespecs_) {
+    if (!typespec->Resolve(*typenames_)) {
+      LOG(ERROR) << "Failed to resolve '" << typespec->GetUnresolvedName() << "' at "
+                 << this->FileName() << ":" << typespec->GetLine();
+      success = false;
+      // don't stop to show more errors if any
+    }
+  }
+  return success;
 }

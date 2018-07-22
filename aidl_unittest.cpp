@@ -74,15 +74,10 @@ class AidlTest : public ::testing::Test {
     io_delegate_.SetFileContents(path, contents);
     unique_ptr<AidlDefinedType> ret;
     std::vector<std::unique_ptr<AidlImport>> imports;
+    ImportResolver import_resolver{io_delegate_, import_paths_, {}};
     AidlError actual_error = ::android::aidl::internals::load_and_validate_aidl(
-        preprocessed_files_,
-        import_paths_,
-        path,
-        false, /* generate_traces */
-        io_delegate_,
-        types,
-        &ret,
-        &imports);
+        preprocessed_files_, import_resolver, path, false, /* generate_traces */
+        io_delegate_, types, &ret, &imports);
     if (error != nullptr) {
       *error = actual_error;
     }
@@ -93,6 +88,7 @@ class AidlTest : public ::testing::Test {
   vector<string> preprocessed_files_;
   vector<string> import_paths_;
   java::JavaTypeNamespace java_types_;
+  AidlTypenames typenames_;
   cpp::TypeNamespace cpp_types_;
 };
 
@@ -185,7 +181,7 @@ TEST_F(AidlTest, ParsesPreprocessedFile) {
   string simple_content = "parcelable a.Foo;\ninterface b.IBar;";
   io_delegate_.SetFileContents("path", simple_content);
   EXPECT_FALSE(java_types_.HasTypeByCanonicalName("a.Foo"));
-  EXPECT_TRUE(parse_preprocessed_file(io_delegate_, "path", &java_types_));
+  EXPECT_TRUE(parse_preprocessed_file(io_delegate_, "path", &java_types_, typenames_));
   EXPECT_TRUE(java_types_.HasTypeByCanonicalName("a.Foo"));
   EXPECT_TRUE(java_types_.HasTypeByCanonicalName("b.IBar"));
 }
@@ -194,7 +190,7 @@ TEST_F(AidlTest, ParsesPreprocessedFileWithWhitespace) {
   string simple_content = "parcelable    a.Foo;\n  interface b.IBar  ;\t";
   io_delegate_.SetFileContents("path", simple_content);
   EXPECT_FALSE(java_types_.HasTypeByCanonicalName("a.Foo"));
-  EXPECT_TRUE(parse_preprocessed_file(io_delegate_, "path", &java_types_));
+  EXPECT_TRUE(parse_preprocessed_file(io_delegate_, "path", &java_types_, typenames_));
   EXPECT_TRUE(java_types_.HasTypeByCanonicalName("a.Foo"));
   EXPECT_TRUE(java_types_.HasTypeByCanonicalName("b.IBar"));
 }
@@ -213,7 +209,7 @@ TEST_F(AidlTest, PreferImportToPreprocessed) {
   EXPECT_TRUE(java_types_.HasTypeByCanonicalName("one.IBar"));
   EXPECT_TRUE(java_types_.HasTypeByCanonicalName("another.IBar"));
   // But if we request just "IBar" we should get our imported one.
-  AidlType ambiguous_type("IBar", 0, "", false /* not an array */);
+  AidlTypeSpecifier ambiguous_type("IBar", false, nullptr, 0, "");
   const java::Type* type = java_types_.Find(ambiguous_type);
   ASSERT_TRUE(type);
   EXPECT_EQ("one.IBar", type->CanonicalName());
@@ -227,9 +223,9 @@ TEST_F(AidlTest, WritePreprocessedFile) {
 
   JavaOptions options;
   options.output_file_name_ = "preprocessed";
-  options.files_to_preprocess_.resize(2);
-  options.files_to_preprocess_[0] = "p/Outer.aidl";
-  options.files_to_preprocess_[1] = "one/IBar.aidl";
+  options.input_file_names_.resize(2);
+  options.input_file_names_[0] = "p/Outer.aidl";
+  options.input_file_names_[1] = "one/IBar.aidl";
   EXPECT_TRUE(::android::aidl::preprocess_aidl(options, io_delegate_));
 
   string output;
@@ -460,6 +456,68 @@ TEST_F(AidlTest, WritesTrivialDependencyFileForParcelable) {
   EXPECT_TRUE(io_delegate_.GetWrittenContents(options.dep_file_name_,
                                               &actual_dep_file_contents));
   EXPECT_EQ(actual_dep_file_contents, kExpectedParcelableDepFileContents);
+}
+
+/* not working until type_namespace.h is fixed
+TEST_F(AidlTest, AcceptsNestedContainerType) {
+  string nested_in_iface = "package a; interface IFoo {\n"
+                           "  List<int, List<String, bool>> foo(); }";
+  string nested_in_parcelable = "package a; parcelable IData {\n"
+                                "  List<int, List<String, bool>> foo;}";
+  EXPECT_NE(nullptr, Parse("a/IFoo.aidl", nested_in_iface, &java_types_));
+  EXPECT_NE(nullptr, Parse("a/IFoo.aidl", nested_in_iface, &cpp_types_));
+  EXPECT_NE(nullptr, Parse("a/IFoo.aidl", nested_in_parcelable, &java_types_));
+  EXPECT_NE(nullptr, Parse("a/IFoo.aidl", nested_in_parcelable, &cpp_types_));
+}
+*/
+
+TEST_F(AidlTest, ApiDump) {
+  io_delegate_.SetFileContents(
+      "foo/bar/IFoo.aidl",
+      "package foo.bar;\n"
+      "import foo.bar.Data;\n"
+      "interface IFoo {\n"
+      "    int foo(out int[] a, String b, boolean c, inout List<String>  d);\n"
+      "    int foo2(@utf8InCpp String x, inout List<String>  y);\n"
+      "    IFoo foo3(IFoo foo);\n"
+      "    Data getData();\n"
+      "}\n");
+  io_delegate_.SetFileContents("foo/bar/Data.aidl",
+                               "package foo.bar;\n"
+                               "import foo.bar.IFoo;\n"
+                               "parcelable Data {\n"
+                               "   int x;\n"
+                               "   int y;\n"
+                               "   IFoo foo;\n"
+                               "   List<IFoo> a;\n"
+                               "   List<foo.bar.IFoo> b;\n"
+                               "}\n");
+  io_delegate_.SetFileContents("api.aidl", "");
+  JavaOptions options;
+  options.input_file_names_ = {"foo/bar/IFoo.aidl", "foo/bar/Data.aidl"};
+  options.output_file_name_ = "api.aidl";
+  bool result = dump_api(options, io_delegate_);
+  ASSERT_TRUE(result);
+  string actual;
+  EXPECT_TRUE(io_delegate_.GetWrittenContents("api.aidl", &actual));
+  EXPECT_EQ(actual, R"(package foo.bar {
+  parcelable Data {
+    int x;
+    int y;
+    foo.bar.IFoo foo;
+    List<foo.bar.IFoo> a;
+    List<foo.bar.IFoo> b;
+  }
+
+  interface IFoo {
+    int foo(out int[] a, String b, boolean c, inout List<String> d);
+    int foo2(@utf8InCpp String x, inout List<String> y);
+    foo.bar.IFoo foo3(foo.bar.IFoo foo);
+    foo.bar.Data getData();
+  }
+
+}
+)");
 }
 
 }  // namespace aidl

@@ -1,7 +1,7 @@
 %{
 #include "aidl_language.h"
 #include "aidl_language_y.h"
-#include <map>
+#include <set>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,10 +27,10 @@ int yylex(yy::parser::semantic_type *, yy::parser::location_type *, void *);
     AidlToken* token;
     int integer;
     std::string *str;
-    AidlType::Annotation annotation;
-    AidlType::Annotation annotation_list;
-    AidlType* type;
-    AidlType* unannotated_type;
+    AidlAnnotation* annotation;
+    std::set<std::unique_ptr<AidlAnnotation>>* annotation_list;
+    AidlTypeSpecifier* type;
+    AidlTypeSpecifier* unannotated_type;
     AidlArgument* arg;
     AidlArgument::Direction direction;
     std::vector<std::unique_ptr<AidlArgument>>* arg_list;
@@ -44,6 +44,7 @@ int yylex(yy::parser::semantic_type *, yy::parser::location_type *, void *);
     AidlParcelable* parcelable;
     AidlDefinedType* declaration;
     AidlDocument* declaration_list;
+    std::vector<std::unique_ptr<AidlTypeSpecifier>>* type_args;
 }
 
 %token<token> ANNOTATION "annotation"
@@ -84,7 +85,7 @@ int yylex(yy::parser::semantic_type *, yy::parser::location_type *, void *);
 %type<arg_list> arg_list
 %type<arg> arg
 %type<direction> direction
-%type<str> generic_list
+%type<type_args> type_args
 %type<qname> qualified_name
 
 %type<token> identifier error
@@ -151,13 +152,14 @@ decl
     bool is_unstructured_parcelable =
       $$->AsParcelable() != nullptr && $$->AsStructuredParcelable() == nullptr;
 
-    if (is_unstructured_parcelable && $1 != AidlAnnotatable::AnnotationNone) {
+    if (is_unstructured_parcelable && !$1->empty()) {
       std::cerr << ps->FileName() << ":" << @1 << ": unstructured parcelables cannot be annotated"
                 << std::endl;
       ps->AddError();
     }
 
-    $$->Annotate($1);
+    $$->Annotate(std::move(*$1));
+    delete $1;
    }
  ;
 
@@ -171,13 +173,16 @@ unannotated_decl
 parcelable_decl
  : PARCELABLE qualified_name ';' {
     $$ = new AidlParcelable($2, @2.begin.line, ps->Package());
+    ps->GetTypenames().AddDefinedType($$);
   }
  | PARCELABLE qualified_name CPP_HEADER C_STR ';' {
     $$ = new AidlParcelable($2, @2.begin.line, ps->Package(), $4->GetText());
+    ps->GetTypenames().AddDefinedType($$);
   }
  | PARCELABLE identifier '{' variable_decls '}' {
     AidlQualifiedName* name = new AidlQualifiedName($2->GetText(), $2->GetComments());
     $$ = new AidlStructuredParcelable(name, @2.begin.line, ps->Package(), $4);
+    ps->GetTypenames().AddDefinedType($$);
  }
  | PARCELABLE error ';' {
     ps->AddError();
@@ -207,12 +212,14 @@ interface_decl
  : INTERFACE identifier '{' interface_members '}' {
     $$ = new AidlInterface($2->GetText(), @1.begin.line, $1->GetComments(),
                            false, $4, ps->Package());
+    ps->GetTypenames().AddDefinedType($$);
     delete $1;
     delete $2;
   }
  | ONEWAY INTERFACE identifier '{' interface_members '}' {
     $$ = new AidlInterface($3->GetText(), @2.begin.line, $1->GetComments(),
                            true, $5, ps->Package());
+    ps->GetTypenames().AddDefinedType($$);
     delete $1;
     delete $2;
     delete $3;
@@ -304,67 +311,63 @@ arg
 
 unannotated_type
  : qualified_name {
-    $$ = new AidlType($1->GetDotName(), @1.begin.line, $1->GetComments(), false);
+    $$ = new AidlTypeSpecifier($1->GetDotName(), false, nullptr, @1.begin.line,
+                               $1->GetComments());
+    ps->DeferResolution($$);
     delete $1;
   }
  | qualified_name '[' ']' {
-    $$ = new AidlType($1->GetDotName(), @1.begin.line, $1->GetComments(),
-                      true);
+    $$ = new AidlTypeSpecifier($1->GetDotName(), true, nullptr, @1.begin.line,
+                               $1->GetComments());
+    ps->DeferResolution($$);
     delete $1;
   }
- | qualified_name '<' generic_list '>' {
-    $$ = new AidlType($1->GetDotName() + "<" + *$3 + ">", @1.begin.line,
-                      $1->GetComments(), false);
+ | qualified_name '<' type_args '>' {
+    $$ = new AidlTypeSpecifier($1->GetDotName(), false, $3, @1.begin.line,
+                               $1->GetComments());
+    ps->DeferResolution($$);
     delete $1;
-    delete $3;
   };
 
 type
  : annotation_list unannotated_type {
     $$ = $2;
-    $2->Annotate($1);
+    $2->Annotate(std::move(*$1));
+    delete $1;
   };
 
-generic_list
- : qualified_name {
-    $$ = new std::string($1->GetDotName());
-    delete $1;
+type_args
+ : unannotated_type {
+    $$ = new std::vector<std::unique_ptr<AidlTypeSpecifier>>();
+    $$->emplace_back($1);
   }
- | generic_list ',' qualified_name {
-    $$ = new std::string(*$1 + "," + $3->GetDotName());
-    delete $1;
-    delete $3;
+ | type_args ',' unannotated_type {
+    $1->emplace_back($3);
   };
 
 annotation_list
  :
-  { $$ = AidlAnnotatable::AnnotationNone; }
+  { $$ = new std::set<unique_ptr<AidlAnnotation>>(); }
  | annotation_list annotation
-  { $$ = static_cast<AidlAnnotatable::Annotation>($1 | $2); };
+  {
+    if ($2 != nullptr) {
+      $1->insert(std::unique_ptr<AidlAnnotation>($2));
+    }
+  };
 
 annotation
  : ANNOTATION
-  { static const std::map<std::string, AidlAnnotatable::Annotation> kAnnotations = {
-      { "nullable", AidlAnnotatable::AnnotationNullable },
-      { "utf8", AidlAnnotatable::AnnotationUtf8 },
-      { "utf8InCpp", AidlAnnotatable::AnnotationUtf8InCpp },
-    };
-
-    auto it = kAnnotations.find($1->GetText());
-    if (it == kAnnotations.end()) {
-      std::cerr << ps->FileName() << ":" << @1 << ": '" << $1->GetText()
-                << "' is not a recognized annotation. It must be one of:";
-      for (const auto& kv : kAnnotations) {
-        std::cerr << " " << kv.first;
-      }
-      std::cerr << "." << std::endl;
-
+  {
+    std::string error;
+    AidlAnnotation* annot = new AidlAnnotation($1->GetText(), error);
+    if (error != "") {
+      std::cerr << ps->FileName() << ":" << @1 << ": ";
+      std::cerr << error << std::endl;
       ps->AddError();
-      $$ = AidlAnnotatable::AnnotationNone;
+      $$ = nullptr;
     } else {
-      $$ = it->second;
+      $$ = annot;
     }
-
   };
 
 direction

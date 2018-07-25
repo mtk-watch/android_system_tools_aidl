@@ -238,7 +238,7 @@ void StubClass::make_as_interface(const InterfaceType* interfaceType,
   IInterfaceType* iinType = new IInterfaceType(types);
   Variable* iin = new Variable(iinType, "iin");
   VariableDeclaration* iinVd =
-      new VariableDeclaration(iin, queryLocalInterface, NULL);
+      new VariableDeclaration(iin, queryLocalInterface, nullptr);
   m->statements->Add(iinVd);
 
   // Ensure the instance type of the local object is as expected.
@@ -337,16 +337,15 @@ static void generate_create_from_parcel(const Type* t, StatementBlock* addTo,
   t->CreateFromParcel(addTo, v, parcel, cl);
 }
 
-static void generate_int_constant(const AidlIntConstant& constant,
-                                  Class* interface) {
-  IntConstant* decl = new IntConstant(constant.GetName(), constant.GetValue());
+static void generate_int_constant(Class* interface, const std::string& name,
+                                  const std::string& value) {
+  IntConstant* decl = new IntConstant(name, value);
   interface->elements.push_back(decl);
 }
 
-static void generate_string_constant(const AidlStringConstant& constant,
-                                     Class* interface) {
-  StringConstant* decl = new StringConstant(constant.GetName(),
-                                            constant.GetValue());
+static void generate_string_constant(Class* interface, const std::string& name,
+                                     const std::string& value) {
+  StringConstant* decl = new StringConstant(name, value);
   interface->elements.push_back(decl);
 }
 
@@ -391,7 +390,7 @@ static void generate_stub_code(const AidlInterface& iface,
   // args
   VariableFactory stubArgs("_arg");
   {
-    Variable* cl = NULL;
+    Variable* cl = nullptr;
     for (const std::unique_ptr<AidlArgument>& arg : method.GetArguments()) {
       const Type* t = arg->GetType().GetLanguageType<Type>();
       Variable* v = stubArgs.Get(t);
@@ -593,7 +592,7 @@ static std::unique_ptr<Method> generate_proxy_method(
   Variable* _data = new Variable(types->ParcelType(), "_data");
   proxy->statements->Add(new VariableDeclaration(
       _data, new MethodCall(types->ParcelType(), "obtain")));
-  Variable* _reply = NULL;
+  Variable* _reply = nullptr;
   if (!oneway) {
     _reply = new Variable(types->ParcelType(), "_reply");
     proxy->statements->Add(new VariableDeclaration(
@@ -601,7 +600,7 @@ static std::unique_ptr<Method> generate_proxy_method(
   }
 
   // the return value
-  Variable* _result = NULL;
+  Variable* _result = nullptr;
   if (method.GetType().GetName() != "void") {
     _result = new Variable(proxy->returnType, "_result",
                            method.GetType().IsArray() ? 1 : 0);
@@ -681,9 +680,9 @@ static std::unique_ptr<Method> generate_proxy_method(
   }
 
   // returning and cleanup
-  if (_reply != NULL) {
+  if (_reply != nullptr) {
     Variable* cl = nullptr;
-    if (_result != NULL) {
+    if (_result != nullptr) {
       generate_create_from_parcel(proxy->returnType, tryStatement->statements,
                                   _result, _reply, &cl);
     }
@@ -708,7 +707,7 @@ static std::unique_ptr<Method> generate_proxy_method(
         new LiteralExpression("android.os.Trace.TRACE_TAG_AIDL")));
   }
 
-  if (_result != NULL) {
+  if (_result != nullptr) {
     proxy->statements->Add(new ReturnStatement(_result));
   }
 
@@ -909,11 +908,22 @@ Class* generate_binder_interface_class(const AidlInterface* iface,
   generate_interface_descriptors(stub, proxy, types);
 
   // all the declared constants of the interface
-  for (const auto& item : iface->GetIntConstants()) {
-    generate_int_constant(*item, interface);
-  }
-  for (const auto& item : iface->GetStringConstants()) {
-    generate_string_constant(*item, interface);
+  for (const auto& constant : iface->GetConstantDeclarations()) {
+    const AidlConstantValue& value = constant->GetValue();
+
+    switch (value.GetType()) {
+      case AidlConstantValue::Type::STRING: {
+        generate_string_constant(interface, constant->GetName(), value.ToString());
+        break;
+      }
+      case AidlConstantValue::Type::INTEGER: {
+        generate_int_constant(interface, constant->GetName(), value.ToString());
+        break;
+      }
+      default: {
+        LOG(FATAL) << "Unrecognized constant type: " << static_cast<int>(value.GetType());
+      }
+    }
   }
 
   // all the declared methods of the interface

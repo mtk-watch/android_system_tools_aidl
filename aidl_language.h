@@ -151,16 +151,22 @@ class AidlTypeSpecifier final : public AidlAnnotatable {
   DISALLOW_COPY_AND_ASSIGN(AidlTypeSpecifier);
 };
 
+class AidlConstantValue;
 class AidlVariableDeclaration : public AidlNode {
  public:
   AidlVariableDeclaration(AidlTypeSpecifier* type, std::string name, unsigned line);
+  AidlVariableDeclaration(AidlTypeSpecifier* type, std::string name, unsigned line,
+                          AidlConstantValue* default_value);
   virtual ~AidlVariableDeclaration() = default;
 
   std::string GetName() const { return name_; }
   int GetLine() const { return line_; }
   const AidlTypeSpecifier& GetType() const { return *type_; }
+  const AidlConstantValue* GetDefaultValue() const { return default_value_.get(); }
+
   AidlTypeSpecifier* GetMutableType() { return type_.get(); }
 
+  bool CheckValid() const;
   std::string ToString() const;
   std::string Signature() const;
 
@@ -168,6 +174,7 @@ class AidlVariableDeclaration : public AidlNode {
   std::unique_ptr<AidlTypeSpecifier> type_;
   std::string name_;
   unsigned line_;
+  std::unique_ptr<AidlConstantValue> default_value_;
 
   DISALLOW_COPY_AND_ASSIGN(AidlVariableDeclaration);
 };
@@ -198,58 +205,65 @@ class AidlArgument : public AidlVariableDeclaration {
 };
 
 class AidlMethod;
-class AidlIntConstant;
-class AidlStringConstant;
+class AidlConstantDeclaration;
 class AidlMember : public AidlNode {
  public:
   AidlMember() = default;
   virtual ~AidlMember() = default;
 
   virtual AidlMethod* AsMethod() { return nullptr; }
-  virtual AidlIntConstant* AsIntConstant() { return nullptr; }
-  virtual AidlStringConstant* AsStringConstant() { return nullptr; }
+  virtual AidlConstantDeclaration* AsConstantDeclaration() { return nullptr; }
 
  private:
   DISALLOW_COPY_AND_ASSIGN(AidlMember);
 };
 
-class AidlIntConstant : public AidlMember {
+class AidlConstantValue : public AidlNode {
  public:
-  AidlIntConstant(std::string name, int32_t value);
-  AidlIntConstant(std::string name, std::string value, unsigned line_number);
-  virtual ~AidlIntConstant() = default;
+  enum class Type { ERROR, INTEGER, STRING };
+  static string ToString(Type type);
 
-  const std::string& GetName() const { return name_; }
-  int GetValue() const { return value_; }
-  bool IsValid() const { return is_valid_; }
+  virtual ~AidlConstantValue() = default;
 
-  AidlIntConstant* AsIntConstant() override { return this; }
+  static AidlConstantValue* LiteralInt(const int32_t value);
+  // example: "0x4f"
+  static AidlConstantValue* ParseHex(const std::string& value, unsigned line);
+  // example: "\"asdf\""
+  static AidlConstantValue* ParseString(const std::string& value, unsigned line);
+
+  Type GetType() const { return type_; }
+  string ToString() const;
 
  private:
-  std::string name_;
-  int32_t value_;
-  bool is_valid_;
+  AidlConstantValue() = default;
+  AidlConstantValue(Type type, const std::string& checked_value);
 
-  DISALLOW_COPY_AND_ASSIGN(AidlIntConstant);
+  const Type type_ = Type::ERROR;
+  const std::string value_;
+
+  DISALLOW_COPY_AND_ASSIGN(AidlConstantValue);
 };
 
-class AidlStringConstant : public AidlMember {
+class AidlConstantDeclaration : public AidlMember {
  public:
-  AidlStringConstant(std::string name, std::string value, unsigned line_number);
-  virtual ~AidlStringConstant() = default;
+  AidlConstantDeclaration(AidlTypeSpecifier* specifier, std::string name, AidlConstantValue* value,
+                          unsigned line);
+  virtual ~AidlConstantDeclaration() = default;
 
+  const AidlTypeSpecifier& GetType() const { return *type_; }
   const std::string& GetName() const { return name_; }
-  const std::string& GetValue() const { return value_; }
-  bool IsValid() const { return is_valid_; }
+  const AidlConstantValue& GetValue() const { return *value_; }
+  bool CheckValid() const;
 
-  AidlStringConstant* AsStringConstant() override { return this; }
+  AidlConstantDeclaration* AsConstantDeclaration() override { return this; }
 
  private:
-  std::string name_;
-  std::string value_;
-  bool is_valid_;
+  const unique_ptr<AidlTypeSpecifier> type_;
+  const std::string name_;
+  const unique_ptr<AidlConstantValue> value_;
+  const unsigned line_;
 
-  DISALLOW_COPY_AND_ASSIGN(AidlStringConstant);
+  DISALLOW_COPY_AND_ASSIGN(AidlConstantDeclaration);
 };
 
 class AidlMethod : public AidlMember {
@@ -459,10 +473,9 @@ class AidlInterface final : public AidlDefinedType {
   bool IsOneway() const { return oneway_; }
   const std::vector<std::unique_ptr<AidlMethod>>& GetMethods() const
       { return methods_; }
-  const std::vector<std::unique_ptr<AidlIntConstant>>& GetIntConstants() const
-      { return int_constants_; }
-  const std::vector<std::unique_ptr<AidlStringConstant>>&
-      GetStringConstants() const { return string_constants_; }
+  const std::vector<std::unique_ptr<AidlConstantDeclaration>>& GetConstantDeclarations() const {
+    return constants_;
+  }
 
   void SetGenerateTraces(bool generate_traces) {
     generate_traces_ = generate_traces;
@@ -480,8 +493,7 @@ class AidlInterface final : public AidlDefinedType {
  private:
   bool oneway_;
   std::vector<std::unique_ptr<AidlMethod>> methods_;
-  std::vector<std::unique_ptr<AidlIntConstant>> int_constants_;
-  std::vector<std::unique_ptr<AidlStringConstant>> string_constants_;
+  std::vector<std::unique_ptr<AidlConstantDeclaration>> constants_;
 
   bool generate_traces_ = false;
 
@@ -498,14 +510,20 @@ class AidlImport : public AidlNode {
   const std::string& GetFilename() const { return filename_; }
   const std::string& GetNeededClass() const { return needed_class_; }
   unsigned GetLine() const { return line_; }
+  const AidlDocument* GetAidlDocument() const {
+    // can return nullptr when AidlDocument is not set.
+    return imported_doc_.get();
+  }
 
   void SetFilename(const std::string& filename) { filename_ = filename; }
+  void SetAidlDocument(unique_ptr<AidlDocument>&& doc) { imported_doc_ = std::move(doc); }
 
  private:
   std::string from_;
   std::string filename_;
   std::string needed_class_;
   unsigned line_;
+  unique_ptr<AidlDocument> imported_doc_;
 
   DISALLOW_COPY_AND_ASSIGN(AidlImport);
 };

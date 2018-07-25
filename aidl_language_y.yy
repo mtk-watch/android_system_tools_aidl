@@ -33,6 +33,7 @@ int yylex(yy::parser::semantic_type *, yy::parser::location_type *, void *);
     AidlTypeSpecifier* unannotated_type;
     AidlArgument* arg;
     AidlArgument::Direction direction;
+    AidlConstantValue* constant_value;
     std::vector<std::unique_ptr<AidlArgument>>* arg_list;
     AidlVariableDeclaration* variable;
     std::vector<std::unique_ptr<AidlVariableDeclaration>>* variable_list;
@@ -62,11 +63,9 @@ int yylex(yy::parser::semantic_type *, yy::parser::location_type *, void *);
 %token IMPORT "import"
 %token IN "in"
 %token INOUT "inout"
-%token INT "int"
 %token OUT "out"
 %token PACKAGE "package"
 %token PARCELABLE "parcelable"
-%token STRING "string"
 
 %type<declaration_list> decls
 %type<declaration> decl
@@ -87,6 +86,7 @@ int yylex(yy::parser::semantic_type *, yy::parser::location_type *, void *);
 %type<direction> direction
 %type<type_args> type_args
 %type<qname> qualified_name
+%type<constant_value> constant_value
 
 %type<token> identifier error
 %%
@@ -105,10 +105,6 @@ identifier
   { $$ = $1; }
  | CPP_HEADER
   { $$ = new AidlToken("cpp_header", ""); }
- | INT
-  { $$ = new AidlToken("int", ""); }
- | STRING
-  { $$ = new AidlToken("String", ""); }
  ;
 
 package
@@ -203,6 +199,9 @@ variable_decl
  : type identifier ';' {
    $$ = new AidlVariableDeclaration($1, $2->GetText(), @2.begin.line);
  }
+ | type identifier '=' constant_value ';' {
+   $$ = new AidlVariableDeclaration($1, $2->GetText(), @2.begin.line, $4);
+ }
  | error ';' {
    ps->AddError();
    $$ = nullptr;
@@ -244,19 +243,22 @@ interface_members
     $$ = $1;
   };
 
+constant_value
+ : INTVALUE { $$ = AidlConstantValue::LiteralInt($1); }
+ | HEXVALUE {
+    $$ = AidlConstantValue::ParseHex($1->GetText(), @1.begin.line);
+    delete $1;
+  }
+ | C_STR {
+    $$ = AidlConstantValue::ParseString($1->GetText(), @1.begin.line);
+    delete $1;
+  }
+ ;
+
 constant_decl
- : CONST INT identifier '=' INTVALUE ';' {
-    $$ = new AidlIntConstant($3->GetText(), $5);
+ : CONST type identifier '=' constant_value ';' {
+    $$ = new AidlConstantDeclaration($2, $3->GetText(), $5, @3.begin.line);
     delete $3;
-   }
- | CONST INT identifier '=' HEXVALUE ';' {
-    $$ = new AidlIntConstant($3->GetText(), $5->GetText(), @5.begin.line);
-    delete $3;
-   }
- | CONST STRING identifier '=' C_STR ';' {
-    $$ = new AidlStringConstant($3->GetText(), $5->GetText(), @5.begin.line);
-    delete $3;
-    delete $5;
    }
  ;
 

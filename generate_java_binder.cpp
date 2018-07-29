@@ -14,7 +14,10 @@
  * limitations under the License.
  */
 
+#include "aidl_to_java.h"
 #include "generate_java.h"
+#include "options.h"
+#include "type_java.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,15 +25,16 @@
 
 #include <algorithm>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 #include <android-base/macros.h>
 #include <android-base/stringprintf.h>
 
-#include "options.h"
-#include "type_java.h"
-
 using android::base::Join;
 using android::base::StringPrintf;
+
+using std::pair;
 using std::string;
 using std::unique_ptr;
 using std::vector;
@@ -42,8 +46,8 @@ namespace java {
 // =================================================
 class StubClass : public Class {
  public:
-  StubClass(const Type* type, const InterfaceType* interfaceType,
-            JavaTypeNamespace* types, const JavaOptions& options);
+  StubClass(const Type* type, const InterfaceType* interfaceType, JavaTypeNamespace* types,
+            const Options& options);
   virtual ~StubClass() = default;
 
   Variable* transact_code;
@@ -72,13 +76,13 @@ class StubClass : public Class {
                          JavaTypeNamespace* types);
 
   Variable* transact_descriptor;
-  const JavaOptions& options_;
+  const Options& options_;
 
   DISALLOW_COPY_AND_ASSIGN(StubClass);
 };
 
-StubClass::StubClass(const Type* type, const InterfaceType* interfaceType,
-                     JavaTypeNamespace* types, const JavaOptions& options)
+StubClass::StubClass(const Type* type, const InterfaceType* interfaceType, JavaTypeNamespace* types,
+                     const Options& options)
     : Class(), options_(options) {
   transact_descriptor = nullptr;
   transact_outline = false;
@@ -125,7 +129,7 @@ StubClass::StubClass(const Type* type, const InterfaceType* interfaceType,
   this->elements.push_back(asBinder);
 
   // getTransactionName
-  if (options_.ShouldGenGetTransactionName()) {
+  if (options_.GenTransactionNames()) {
     Method* getTransactionName = new Method;
     getTransactionName->modifiers = PUBLIC;
     getTransactionName->returnType = types->StringType();
@@ -170,7 +174,7 @@ void StubClass::finish() {
   transact_statements->Add(this->transact_switch);
 
   // getTransactionName
-  if (options_.ShouldGenGetTransactionName()) {
+  if (options_.GenTransactionNames()) {
     // Some transaction codes are common, e.g. INTERFACE_TRANSACTION or DUMP_TRANSACTION.
     // Common transaction codes will not be resolved to a string by getTransactionName. The method
     // will return NULL in this case.
@@ -326,15 +330,22 @@ static void generate_new_array(const Type* t, StatementBlock* addTo,
   addTo->Add(lencheck);
 }
 
-static void generate_write_to_parcel(const Type* t, StatementBlock* addTo,
-                                     Variable* v, Variable* parcel, int flags) {
-  t->WriteToParcel(addTo, v, parcel, flags);
-}
-
-static void generate_create_from_parcel(const Type* t, StatementBlock* addTo,
-                                        Variable* v, Variable* parcel,
-                                        Variable** cl) {
-  t->CreateFromParcel(addTo, v, parcel, cl);
+static void generate_write_to_parcel(const AidlTypeSpecifier& type, StatementBlock* addTo,
+                                     Variable* v, Variable* parcel, bool is_return_value,
+                                     const AidlTypenames& typenames) {
+  string code;
+  CodeWriterPtr writer = CodeWriter::ForString(&code);
+  CodeGeneratorContext context{
+      .writer = *(writer.get()),
+      .typenames = typenames,
+      .type = type,
+      .var = v->name,
+      .parcel = parcel->name,
+      .is_return_value = is_return_value,
+  };
+  WriteToParcelFor(context);
+  writer->Close();
+  addTo->Add(new LiteralStatement(code));
 }
 
 static void generate_int_constant(Class* interface, const std::string& name,
@@ -390,7 +401,9 @@ static void generate_stub_code(const AidlInterface& iface,
   // args
   VariableFactory stubArgs("_arg");
   {
-    Variable* cl = nullptr;
+    // keep this across different args in order to create the classloader
+    // at most once.
+    bool is_classloader_created = false;
     for (const std::unique_ptr<AidlArgument>& arg : method.GetArguments()) {
       const Type* t = arg->GetType().GetLanguageType<Type>();
       Variable* v = stubArgs.Get(t);
@@ -399,11 +412,17 @@ static void generate_stub_code(const AidlInterface& iface,
       statements->Add(new VariableDeclaration(v));
 
       if (arg->GetDirection() & AidlArgument::IN_DIR) {
-        generate_create_from_parcel(t,
-                                    statements,
-                                    v,
-                                    transact_data,
-                                    &cl);
+        string code;
+        CodeWriterPtr writer = CodeWriter::ForString(&code);
+        CodeGeneratorContext context{.writer = *(writer.get()),
+                                     .typenames = types->typenames_,
+                                     .type = arg->GetType(),
+                                     .var = v->name,
+                                     .parcel = transact_data->name,
+                                     .is_classloader_created = &is_classloader_created};
+        CreateFromParcelFor(context);
+        writer->Close();
+        statements->Add(new LiteralStatement(code));
       } else {
         if (!arg->GetType().IsArray()) {
           statements->Add(new Assignment(v, new NewExpression(v->type)));
@@ -474,25 +493,18 @@ static void generate_stub_code(const AidlInterface& iface,
     }
 
     // marshall the return value
-    generate_write_to_parcel(method.GetType().GetLanguageType<Type>(),
-                             statements,
-                             _result,
-                             transact_reply,
-                             Type::PARCELABLE_WRITE_RETURN_VALUE);
+    generate_write_to_parcel(method.GetType(), statements, _result, transact_reply, true,
+                             types->typenames_);
   }
 
   // out parameters
   int i = 0;
   for (const std::unique_ptr<AidlArgument>& arg : method.GetArguments()) {
-    const Type* t = arg->GetType().GetLanguageType<Type>();
     Variable* v = stubArgs.Get(i++);
 
     if (arg->GetDirection() & AidlArgument::OUT_DIR) {
-      generate_write_to_parcel(t,
-                               statements,
-                               v,
-                               transact_reply,
-                               Type::PARCELABLE_WRITE_RETURN_VALUE);
+      generate_write_to_parcel(arg->GetType(), statements, v, transact_reply, true,
+                               types->typenames_);
     }
   }
 
@@ -642,7 +654,8 @@ static std::unique_ptr<Method> generate_proxy_method(
           new MethodCall(_data, "writeInt", 1, new FieldVariable(v, "length")));
       tryStatement->statements->Add(checklen);
     } else if (dir & AidlArgument::IN_DIR) {
-      generate_write_to_parcel(t, tryStatement->statements, v, _data, 0);
+      generate_write_to_parcel(arg->GetType(), tryStatement->statements, v, _data, false,
+                               types->typenames_);
     } else {
       delete v;
     }
@@ -681,19 +694,37 @@ static std::unique_ptr<Method> generate_proxy_method(
 
   // returning and cleanup
   if (_reply != nullptr) {
-    Variable* cl = nullptr;
+    // keep this across return value and arguments in order to create the
+    // classloader at most once.
+    bool is_classloader_created = false;
     if (_result != nullptr) {
-      generate_create_from_parcel(proxy->returnType, tryStatement->statements,
-                                  _result, _reply, &cl);
+      string code;
+      CodeWriterPtr writer = CodeWriter::ForString(&code);
+      CodeGeneratorContext context{.writer = *(writer.get()),
+                                   .typenames = types->typenames_,
+                                   .type = method.GetType(),
+                                   .var = _result->name,
+                                   .parcel = _reply->name,
+                                   .is_classloader_created = &is_classloader_created};
+      CreateFromParcelFor(context);
+      writer->Close();
+      tryStatement->statements->Add(new LiteralStatement(code));
     }
 
     // the out/inout parameters
     for (const std::unique_ptr<AidlArgument>& arg : method.GetArguments()) {
-      const Type* t = arg->GetType().GetLanguageType<Type>();
       if (arg->GetDirection() & AidlArgument::OUT_DIR) {
-        Variable* v =
-            new Variable(t, arg->GetName(), arg->GetType().IsArray() ? 1 : 0);
-        t->ReadFromParcel(tryStatement->statements, v, _reply, &cl);
+        string code;
+        CodeWriterPtr writer = CodeWriter::ForString(&code);
+        CodeGeneratorContext context{.writer = *(writer.get()),
+                                     .typenames = types->typenames_,
+                                     .type = arg->GetType(),
+                                     .var = arg->GetName(),
+                                     .parcel = _reply->name,
+                                     .is_classloader_created = &is_classloader_created};
+        ReadFromParcelFor(context);
+        writer->Close();
+        tryStatement->statements->Add(new LiteralStatement(code));
       }
     }
 
@@ -714,14 +745,9 @@ static std::unique_ptr<Method> generate_proxy_method(
   return proxy;
 }
 
-static void generate_methods(const AidlInterface& iface,
-                             const AidlMethod& method,
-                             Class* interface,
-                             StubClass* stubClass,
-                             ProxyClass* proxyClass,
-                             int index,
-                             JavaTypeNamespace* types,
-                             const JavaOptions& options) {
+static void generate_methods(const AidlInterface& iface, const AidlMethod& method, Class* interface,
+                             StubClass* stubClass, ProxyClass* proxyClass, int index,
+                             JavaTypeNamespace* types, const Options& options) {
   const bool oneway = proxyClass->mOneWay || method.IsOneway();
 
   // == the TRANSACT_ constant =============================================
@@ -735,7 +761,7 @@ static void generate_methods(const AidlInterface& iface,
   stubClass->elements.push_back(transactCode);
 
   // getTransactionName
-  if (options.ShouldGenGetTransactionName()) {
+  if (options.GenTransactionNames()) {
     Case* c = new Case(transactCodeName);
     c->statements->Add(new ReturnStatement(new StringLiteralExpression(method.GetName())));
     stubClass->code_to_method_name_switch->cases.push_back(c);
@@ -845,7 +871,7 @@ static unique_ptr<ClassElement> generate_default_impl_method(const AidlMethod& m
       method.GetType().GetLanguageType<Type>()->GetTypeNamespace()->RemoteExceptionType());
 
   if (method.GetType().GetName() != "void") {
-    const string& defaultValue = method.GetType().GetLanguageType<Type>()->DefaultValue();
+    const string& defaultValue = DefaultJavaValueOf(method.GetType());
     default_method->statements->Add(
         new LiteralStatement(StringPrintf("return %s;\n", defaultValue.c_str())));
   }
@@ -873,9 +899,8 @@ static unique_ptr<Class> generate_default_impl_class(const AidlInterface& iface)
   return default_class;
 }
 
-Class* generate_binder_interface_class(const AidlInterface* iface,
-                                       JavaTypeNamespace* types,
-                                       const JavaOptions& options) {
+Class* generate_binder_interface_class(const AidlInterface* iface, JavaTypeNamespace* types,
+                                       const Options& options) {
   const InterfaceType* interfaceType = iface->GetLanguageType<InterfaceType>();
 
   // the interface class

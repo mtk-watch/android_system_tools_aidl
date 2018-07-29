@@ -44,6 +44,7 @@ cc_library_host_static {
         "aidl_language_l.ll",
         "aidl_language_y.yy",
         "aidl_typenames.cpp",
+        "aidl_to_java.cpp",
         "ast_cpp.cpp",
         "ast_java.cpp",
         "code_writer.cpp",
@@ -64,7 +65,7 @@ cc_library_host_static {
 cc_binary_host {
     name: "aidl",
     defaults: ["aidl_defaults"],
-    srcs: ["main_java.cpp"],
+    srcs: ["main.cpp"],
     static_libs: [
         "libaidl-common",
         "libbase",

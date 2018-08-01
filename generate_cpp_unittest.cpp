@@ -1380,24 +1380,18 @@ IMPLEMENT_META_INTERFACE(ComplexTypeInterface, "android.os.IComplexTypeInterface
 
 class ASTTest : public ::testing::Test {
  protected:
-  ASTTest(string file_path, string file_contents)
-      : file_path_(file_path),
-        file_contents_(file_contents) {
+  ASTTest(const string& cmdline, const string& file_contents)
+      : options_(Options::From(cmdline)), file_contents_(file_contents) {
     types_.Init();
   }
 
   unique_ptr<AidlInterface> ParseInterface() {
-    io_delegate_.SetFileContents(file_path_, file_contents_);
+    io_delegate_.SetFileContents(options_.InputFiles().at(0), file_contents_);
 
     unique_ptr<AidlDefinedType> ret;
     std::vector<std::unique_ptr<AidlImport>> imports;
-    ImportResolver import_resolver{io_delegate_, {"."}, {}};
-    AidlError err =
-        ::android::aidl::internals::load_and_validate_aidl({},  // no preprocessed files
-                                                           import_resolver, file_path_,
-                                                           false,  // generate_traces
-                                                           false,  // is_structured
-                                                           io_delegate_, &types_, &ret, &imports);
+    AidlError err = ::android::aidl::internals::load_and_validate_aidl(
+        options_.InputFiles().front(), options_, io_delegate_, &types_, &ret, &imports);
 
     if (err != AidlError::OK) {
       return nullptr;
@@ -1422,7 +1416,7 @@ class ASTTest : public ::testing::Test {
     FAIL() << "Document contents did not match expected contents";
   }
 
-  const string file_path_;
+  const Options options_;
   const string file_contents_;
   FakeIoDelegate io_delegate_;
   TypeNamespace types_;
@@ -1431,7 +1425,7 @@ class ASTTest : public ::testing::Test {
 class ComplexTypeInterfaceASTTest : public ASTTest {
  public:
   ComplexTypeInterfaceASTTest()
-      : ASTTest("android/os/IComplexTypeInterface.aidl",
+      : ASTTest("aidl --lang=cpp -I . -o out android/os/IComplexTypeInterface.aidl",
                 kComplexTypeInterfaceAIDL) {
     io_delegate_.SetFileContents("foo/IFooType.aidl",
                                  "package foo; interface IFooType {}");
@@ -1441,59 +1435,66 @@ class ComplexTypeInterfaceASTTest : public ASTTest {
 TEST_F(ComplexTypeInterfaceASTTest, GeneratesClientHeader) {
   unique_ptr<AidlInterface> interface = ParseInterface();
   ASSERT_NE(interface, nullptr);
-  unique_ptr<Document> doc = internals::BuildClientHeader(types_, *interface);
+  unique_ptr<Document> doc = internals::BuildClientHeader(types_, *interface, options_);
   Compare(doc.get(), kExpectedComplexTypeClientHeaderOutput);
 }
 
 TEST_F(ComplexTypeInterfaceASTTest, GeneratesClientSource) {
   unique_ptr<AidlInterface> interface = ParseInterface();
   ASSERT_NE(interface, nullptr);
-  unique_ptr<Document> doc = internals::BuildClientSource(types_, *interface);
+  unique_ptr<Document> doc = internals::BuildClientSource(types_, *interface, options_);
   Compare(doc.get(), kExpectedComplexTypeClientSourceOutput);
-}
-
-TEST_F(ComplexTypeInterfaceASTTest, GeneratesClientSourceWithTrace) {
-  unique_ptr<AidlInterface> interface = ParseInterface();
-  ASSERT_NE(interface, nullptr);
-  interface->SetGenerateTraces(true);
-  unique_ptr<Document> doc = internals::BuildClientSource(types_, *interface);
-  Compare(doc.get(), kExpectedComplexTypeClientWithTraceSourceOutput);
 }
 
 TEST_F(ComplexTypeInterfaceASTTest, GeneratesServerHeader) {
   unique_ptr<AidlInterface> interface = ParseInterface();
   ASSERT_NE(interface, nullptr);
-  unique_ptr<Document> doc = internals::BuildServerHeader(types_, *interface);
+  unique_ptr<Document> doc = internals::BuildServerHeader(types_, *interface, options_);
   Compare(doc.get(), kExpectedComplexTypeServerHeaderOutput);
 }
 
 TEST_F(ComplexTypeInterfaceASTTest, GeneratesServerSource) {
   unique_ptr<AidlInterface> interface = ParseInterface();
   ASSERT_NE(interface, nullptr);
-  unique_ptr<Document> doc = internals::BuildServerSource(types_, *interface);
+  unique_ptr<Document> doc = internals::BuildServerSource(types_, *interface, options_);
   Compare(doc.get(), kExpectedComplexTypeServerSourceOutput);
-}
-
-TEST_F(ComplexTypeInterfaceASTTest, GeneratesServerSourceWithTrace) {
-  unique_ptr<AidlInterface> interface = ParseInterface();
-  ASSERT_NE(interface, nullptr);
-  interface->SetGenerateTraces(true);
-  unique_ptr<Document> doc = internals::BuildServerSource(types_, *interface);
-  Compare(doc.get(), kExpectedComplexTypeServerWithTraceSourceOutput);
 }
 
 TEST_F(ComplexTypeInterfaceASTTest, GeneratesInterfaceHeader) {
   unique_ptr<AidlInterface> interface = ParseInterface();
   ASSERT_NE(interface, nullptr);
-  unique_ptr<Document> doc = internals::BuildInterfaceHeader(types_, *interface);
+  unique_ptr<Document> doc = internals::BuildInterfaceHeader(types_, *interface, options_);
   Compare(doc.get(), kExpectedComplexTypeInterfaceHeaderOutput);
 }
 
 TEST_F(ComplexTypeInterfaceASTTest, GeneratesInterfaceSource) {
   unique_ptr<AidlInterface> interface = ParseInterface();
   ASSERT_NE(interface, nullptr);
-  unique_ptr<Document> doc = internals::BuildInterfaceSource(types_, *interface);
+  unique_ptr<Document> doc = internals::BuildInterfaceSource(types_, *interface, options_);
   Compare(doc.get(), kExpectedComplexTypeInterfaceSourceOutput);
+}
+
+class ComplexTypeInterfaceASTTestWithTrace : public ASTTest {
+ public:
+  ComplexTypeInterfaceASTTestWithTrace()
+      : ASTTest("aidl --lang=cpp -t -I . -o out android/os/IComplexTypeInterface.aidl",
+                kComplexTypeInterfaceAIDL) {
+    io_delegate_.SetFileContents("foo/IFooType.aidl", "package foo; interface IFooType {}");
+  }
+};
+
+TEST_F(ComplexTypeInterfaceASTTestWithTrace, GeneratesClientSource) {
+  unique_ptr<AidlInterface> interface = ParseInterface();
+  ASSERT_NE(interface, nullptr);
+  unique_ptr<Document> doc = internals::BuildClientSource(types_, *interface, options_);
+  Compare(doc.get(), kExpectedComplexTypeClientWithTraceSourceOutput);
+}
+
+TEST_F(ComplexTypeInterfaceASTTestWithTrace, GeneratesServerSource) {
+  unique_ptr<AidlInterface> interface = ParseInterface();
+  ASSERT_NE(interface, nullptr);
+  unique_ptr<Document> doc = internals::BuildServerSource(types_, *interface, options_);
+  Compare(doc.get(), kExpectedComplexTypeServerWithTraceSourceOutput);
 }
 
 namespace test_io_handling {
@@ -1503,34 +1504,20 @@ const char kOutputPath[] = "output.cpp";
 const char kHeaderDir[] = "headers";
 const char kInterfaceHeaderRelPath[] = "a/IFoo.h";
 
+const string kCmdline = string("aidl-cpp ") + kInputPath + " " + kHeaderDir + " " + kOutputPath;
+
 }  // namespace test_io_handling
 
 class IoErrorHandlingTest : public ASTTest {
  public:
-  IoErrorHandlingTest ()
-      : ASTTest(test_io_handling::kInputPath,
-                "package a; interface IFoo {}"),
-        options_(GetOptions()) {}
-
-  const unique_ptr<Options> options_;
-
- private:
-  static unique_ptr<Options> GetOptions() {
-    using namespace test_io_handling;
-
-    const int argc = 4;
-    const char* cmdline[argc] = {
-      "aidl-cpp", kInputPath, kHeaderDir, kOutputPath
-    };
-    return unique_ptr<Options>(new Options(argc, cmdline, Options::Language::CPP));
-  }
+  IoErrorHandlingTest() : ASTTest(test_io_handling::kCmdline, "package a; interface IFoo {}") {}
 };
 
 TEST_F(IoErrorHandlingTest, GenerateCorrectlyAbsentErrors) {
   // Confirm that this is working correctly without I/O problems.
   const unique_ptr<AidlInterface> interface = ParseInterface();
   ASSERT_NE(interface, nullptr);
-  ASSERT_TRUE(GenerateCpp(options_->OutputFile(), *options_, types_, *interface, io_delegate_));
+  ASSERT_TRUE(GenerateCpp(options_.OutputFile(), options_, types_, *interface, io_delegate_));
 }
 
 TEST_F(IoErrorHandlingTest, HandlesBadHeaderWrite) {
@@ -1543,7 +1530,7 @@ TEST_F(IoErrorHandlingTest, HandlesBadHeaderWrite) {
       StringPrintf("%s%c%s", kHeaderDir, OS_PATH_SEPARATOR,
                    kInterfaceHeaderRelPath);
   io_delegate_.AddBrokenFilePath(header_path);
-  ASSERT_FALSE(GenerateCpp(options_->OutputFile(), *options_, types_, *interface, io_delegate_));
+  ASSERT_FALSE(GenerateCpp(options_.OutputFile(), options_, types_, *interface, io_delegate_));
   // We should never attempt to write the C++ file if we fail writing headers.
   ASSERT_FALSE(io_delegate_.GetWrittenContents(kOutputPath, nullptr));
   // We should remove partial results.
@@ -1557,7 +1544,7 @@ TEST_F(IoErrorHandlingTest, HandlesBadCppWrite) {
 
   // Simulate issues closing the cpp file.
   io_delegate_.AddBrokenFilePath(kOutputPath);
-  ASSERT_FALSE(GenerateCpp(options_->OutputFile(), *options_, types_, *interface, io_delegate_));
+  ASSERT_FALSE(GenerateCpp(options_.OutputFile(), options_, types_, *interface, io_delegate_));
   // We should remove partial results.
   ASSERT_TRUE(io_delegate_.PathWasRemoved(kOutputPath));
 }

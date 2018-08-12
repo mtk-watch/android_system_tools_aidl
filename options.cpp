@@ -15,6 +15,7 @@
  */
 
 #include "options.h"
+#include "logging.h"
 #include "os.h"
 
 #include <getopt.h>
@@ -45,6 +46,10 @@ string Options::GetUsage() const {
        << endl
        << myname_ << " --dumpapi OUTPUT INPUT..." << endl
        << "   Dump API signature of AIDL file(s)." << endl
+       << endl
+       << myname_ << " --checkapi OLD NEW" << endl
+       << "   Checkes whether API dump NEW is backwards compatible extension " << endl
+       << "   of the API dump OLD." << endl
        << endl;
 
   // Legacy option formats
@@ -136,6 +141,7 @@ Options::Options(int argc, const char* const argv[], Options::Language default_l
         {"lang", required_argument, 0, 'l'},
         {"preprocess", no_argument, 0, 's'},
         {"dumpapi", no_argument, 0, 'u'},
+        {"checkapi", no_argument, 0, 'A'},
         {"include", required_argument, 0, 'I'},
         {"preprocessed", required_argument, 0, 'p'},
         {"dep", required_argument, 0, 'd'},
@@ -184,7 +190,14 @@ Options::Options(int argc, const char* const argv[], Options::Language default_l
         break;
       case 'u':
         if (task_ != Options::Task::UNSPECIFIED) {
-          task_ = Options::Task::DUMPAPI;
+          task_ = Options::Task::DUMP_API;
+        }
+        break;
+      case 'A':
+        if (task_ != Options::Task::UNSPECIFIED) {
+          task_ = Options::Task::CHECK_API;
+          // to ensure that all parcelables in the api dumpes are structured
+          structured_ = true;
         }
         break;
       case 'I':
@@ -198,9 +211,15 @@ Options::Options(int argc, const char* const argv[], Options::Language default_l
         break;
       case 'o':
         output_dir_ = Trim(optarg);
+        if (output_dir_.back() != OS_PATH_SEPARATOR) {
+          output_dir_.push_back(OS_PATH_SEPARATOR);
+        }
         break;
       case 'h':
         output_header_dir_ = Trim(optarg);
+        if (output_header_dir_.back() != OS_PATH_SEPARATOR) {
+          output_header_dir_.push_back(OS_PATH_SEPARATOR);
+        }
         break;
       case 'n':
         dependency_file_ninja_ = true;
@@ -236,8 +255,8 @@ Options::Options(int argc, const char* const argv[], Options::Language default_l
         std::cerr << GetUsage();
         exit(0);
       default:
-        error_message_ << "Invalid argument: '" << argv[optind] << "'" << endl;
-        return;
+        std::cerr << GetUsage();
+        exit(1);
     }
   }  // while
 
@@ -256,9 +275,13 @@ Options::Options(int argc, const char* const argv[], Options::Language default_l
         // when output is omitted, output is by default set to the input
         // file path with .aidl is replaced to .java.
         output_file_ = input_files_.front();
-        output_file_.replace(output_file_.length() - strlen(".aidl"), strlen(".aidl"), ".java");
+        if (android::base::EndsWith(output_file_, ".aidl")) {
+          output_file_ = output_file_.substr(0, output_file_.length() - strlen(".aidl"));
+        }
+        output_file_ += ".java";
+
         if (!output_dir_.empty()) {
-          output_file_ = output_dir_ + OS_PATH_SEPARATOR + output_file_;
+          output_file_ = output_dir_ + output_file_;
         }
       }
     } else if (language_ == Options::Language::CPP) {
@@ -268,6 +291,9 @@ Options::Options(int argc, const char* const argv[], Options::Language default_l
         return;
       }
       output_header_dir_ = argv[optind++];
+      if (output_header_dir_.back() != OS_PATH_SEPARATOR) {
+        output_header_dir_.push_back(OS_PATH_SEPARATOR);
+      }
       output_file_ = argv[optind++];
     }
     if (argc - optind > 0) {
@@ -277,7 +303,6 @@ Options::Options(int argc, const char* const argv[], Options::Language default_l
       }
       error_message_ << endl;
     }
-    return;
   } else {
     // the new arguments format
     if (task_ == Options::Task::COMPILE) {
@@ -291,7 +316,9 @@ Options::Options(int argc, const char* const argv[], Options::Language default_l
                        << "got " << (argc - optind) << "." << endl;
         return;
       }
-      output_file_ = argv[optind++];
+      if (task_ != Options::Task::CHECK_API) {
+        output_file_ = argv[optind++];
+      }
     }
     while (optind < argc) {
       input_files_.emplace_back(argv[optind++]);
@@ -305,26 +332,28 @@ Options::Options(int argc, const char* const argv[], Options::Language default_l
       return;
     }
   }
-  if (language_ == Options::Language::CPP && task_ == Options::Task::COMPILE) {
-    if (output_dir_.empty()) {
-      error_message_ << "Output directory is not set. Set with --out." << endl;
-      return;
+  if (lang_option_found) {
+    if (language_ == Options::Language::CPP && task_ == Options::Task::COMPILE) {
+      if (output_dir_.empty()) {
+        error_message_ << "Output directory is not set. Set with --out." << endl;
+        return;
+      }
+      if (output_header_dir_.empty()) {
+        error_message_ << "Header output directory is not set. Set with "
+                       << "--header_out." << endl;
+        return;
+      }
     }
-    if (output_header_dir_.empty()) {
-      error_message_ << "Header output directory is not set. Set with "
-                     << "--header_out." << endl;
-      return;
-    }
-  }
-  if (language_ == Options::Language::JAVA && task_ == Options::Task::COMPILE) {
-    if (output_dir_.empty()) {
-      error_message_ << "Output directory is not set. Set with --out." << endl;
-      return;
-    }
-    if (!output_header_dir_.empty()) {
-      error_message_ << "Header output directory is set, which does not make "
-                     << "sense for Java." << endl;
-      return;
+    if (language_ == Options::Language::JAVA && task_ == Options::Task::COMPILE) {
+      if (output_dir_.empty()) {
+        error_message_ << "Output directory is not set. Set with --out." << endl;
+        return;
+      }
+      if (!output_header_dir_.empty()) {
+        error_message_ << "Header output directory is set, which does not make "
+                       << "sense for Java." << endl;
+        return;
+      }
     }
   }
   if (task_ == Options::Task::COMPILE) {
@@ -348,6 +377,16 @@ Options::Options(int argc, const char* const argv[], Options::Language default_l
       return;
     }
   }
+  if (task_ == Options::Task::CHECK_API) {
+    if (input_files_.size() != 2) {
+      error_message_ << "--checkapi requires two inputs for comparing, "
+                     << "but got " << input_files_.size() << "." << endl;
+      return;
+    }
+  }
+
+  CHECK(output_dir_.empty() || output_dir_.back() == OS_PATH_SEPARATOR);
+  CHECK(output_header_dir_.empty() || output_header_dir_.back() == OS_PATH_SEPARATOR);
 }
 
 }  // namespace android

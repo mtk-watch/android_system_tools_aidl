@@ -14,17 +14,12 @@
  * limitations under the License.
  */
 
-package android.aidl.tests;
+package some_package.sub_package;
 
-parcelable StructuredParcelable {
-    int[] shouldContainThreeFs;
-    int f;
-    @utf8InCpp String shouldBeJerry;
+import some_package.Thing;
+import some_package.sub_package.SubThing;
 
-    String stringDefaultsToFoo = "foo";
-    byte byteDefaultsToFour = 4;
-    int intDefaultsToFive = 5;
-    long longDefaultsToNegativeSeven = -7;
-    boolean booleanDefaultsToTrue = true;
-    char charDefaultsToC = 'C';
+interface IFoo {
+    void CanYouDealWithThisThing(inout Thing parcel);
+    void CanYouDealWithThisSubThing(inout SubThing parcel);
 }

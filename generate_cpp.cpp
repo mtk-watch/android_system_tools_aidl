@@ -730,8 +730,8 @@ unique_ptr<Document> BuildInterfaceSource(const TypeNamespace& types,
         ClassName(interface, ClassNames::INTERFACE),
         constant->GetName(),
         {}));
-    getter->GetStatementBlock()->AddLiteral(
-        StringPrintf("static const ::android::String16 value(%s)", value.ToString().c_str()));
+    getter->GetStatementBlock()->AddLiteral(StringPrintf(
+        "static const ::android::String16 value(%s)", constant->ValueString().c_str()));
     getter->GetStatementBlock()->AddLiteral("return value");
     decls.push_back(std::move(getter));
   }
@@ -897,8 +897,9 @@ unique_ptr<Document> BuildInterfaceHeader(const TypeNamespace& types,
         string_constants.push_back(std::move(getter));
         break;
       }
-      case AidlConstantValue::Type::INTEGER: {
-        int_constant_enum->AddValue(constant->GetName(), value.ToString());
+      case AidlConstantValue::Type::INTEGRAL:
+      case AidlConstantValue::Type::HEXIDECIMAL: {
+        int_constant_enum->AddValue(constant->GetName(), constant->ValueString());
         break;
       }
       default: {
@@ -979,12 +980,11 @@ std::unique_ptr<Document> BuildParcelHeader(const TypeNamespace& /*types*/,
 
   for (const auto& variable : parcel.GetFields()) {
     const Type* type = variable->GetType().GetLanguageType<Type>();
-    const AidlConstantValue* default_value = variable->GetDefaultValue();
 
     std::ostringstream out;
     out << type->CppType().c_str() << " " << variable->GetName().c_str();
-    if (default_value) {
-      out << " = " << type->CppType().c_str() << "(" << default_value->ToString() << ")";
+    if (variable->GetDefaultValue()) {
+      out << " = " << type->CppType().c_str() << "(" << variable->ValueString() << ")";
     }
     out << ";\n";
 
@@ -1072,8 +1072,7 @@ bool WriteHeader(const Options& options, const TypeNamespace& types, const AidlI
     return false;
   }
 
-  const string header_path = options.OutputHeaderDir() + OS_PATH_SEPARATOR +
-                             HeaderFile(interface, header_type);
+  const string header_path = options.OutputHeaderDir() + HeaderFile(interface, header_type);
   unique_ptr<CodeWriter> code_writer(io_delegate.GetCodeWriter(header_path));
   header->Write(code_writer.get());
 
@@ -1116,12 +1115,6 @@ bool GenerateCppInterface(const string& output_file, const Options& options,
     return false;
   }
 
-  if (!io_delegate.CreatedNestedDirs(options.OutputHeaderDir(),
-                                     interface.GetSplitPackage())) {
-    LOG(ERROR) << "Failed to create directory structure for headers.";
-    return false;
-  }
-
   if (!WriteHeader(options, types, interface, io_delegate,
                    ClassNames::INTERFACE) ||
       !WriteHeader(options, types, interface, io_delegate,
@@ -1154,24 +1147,17 @@ bool GenerateCppParcel(const string& output_file, const Options& options,
     return false;
   }
 
-  if (!io_delegate.CreatedNestedDirs(options.OutputHeaderDir(), parcelable.GetSplitPackage())) {
-    LOG(ERROR) << "Failed to create directory structure for headers.";
-  }
-
-  const string header_path =
-      options.OutputHeaderDir() + OS_PATH_SEPARATOR + HeaderFile(parcelable, ClassNames::BASE);
+  const string header_path = options.OutputHeaderDir() + HeaderFile(parcelable, ClassNames::BASE);
   unique_ptr<CodeWriter> header_writer(io_delegate.GetCodeWriter(header_path));
   header->Write(header_writer.get());
   CHECK(header_writer->Close());
 
   // TODO(b/111362593): no unecessary files just to have consistent output with interfaces
-  const string bp_header =
-      options.OutputHeaderDir() + OS_PATH_SEPARATOR + HeaderFile(parcelable, ClassNames::CLIENT);
+  const string bp_header = options.OutputHeaderDir() + HeaderFile(parcelable, ClassNames::CLIENT);
   unique_ptr<CodeWriter> bp_writer(io_delegate.GetCodeWriter(bp_header));
   bp_writer->Write("#error TODO(b/111362593) parcelables do not have bp classes");
   CHECK(bp_writer->Close());
-  const string bn_header =
-      options.OutputHeaderDir() + OS_PATH_SEPARATOR + HeaderFile(parcelable, ClassNames::SERVER);
+  const string bn_header = options.OutputHeaderDir() + HeaderFile(parcelable, ClassNames::SERVER);
   unique_ptr<CodeWriter> bn_writer(io_delegate.GetCodeWriter(bn_header));
   bn_writer->Write("#error TODO(b/111362593) parcelables do not have bn classes");
   CHECK(bn_writer->Close());

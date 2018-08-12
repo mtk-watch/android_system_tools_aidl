@@ -100,6 +100,11 @@ static bool HasAnnotation(const set<unique_ptr<AidlAnnotation>>& annotations, co
   return false;
 }
 
+bool operator==(const unique_ptr<AidlAnnotation>& lhs,
+                const unique_ptr<AidlAnnotation>& rhs) {
+  return lhs->GetName() == rhs->GetName();
+}
+
 AidlAnnotatable::AidlAnnotatable(const AidlLocation& location) : AidlNode(location) {}
 
 bool AidlAnnotatable::IsNullable() const {
@@ -197,33 +202,31 @@ AidlVariableDeclaration::AidlVariableDeclaration(const AidlLocation& location,
     : AidlNode(location), type_(type), name_(name), default_value_(default_value) {}
 
 bool AidlVariableDeclaration::CheckValid() const {
-  if (!type_->CheckValid()) {
-    return false;
-  }
+  bool valid = true;
+  valid &= type_->CheckValid();
 
   if (default_value_ == nullptr) return true;
+  valid &= default_value_->CheckValid();
 
-  const string given_type = type_->GetName();
-  const string value_type = AidlConstantValue::ToString(default_value_->GetType());
+  if (!valid) return false;
 
-  if (given_type != value_type) {
-    AIDL_ERROR(*this) << "Declaration " << name_ << " is of type " << given_type
-                      << " but value is of type " << value_type << endl;
-    return false;
-  }
-  return true;
+  return !ValueString().empty();
 }
 
 string AidlVariableDeclaration::ToString() const {
   string ret = type_->ToString() + " " + name_;
   if (default_value_ != nullptr) {
-    ret += " = " + default_value_->ToString();
+    ret += " = " + ValueString();
   }
   return ret;
 }
 
 string AidlVariableDeclaration::Signature() const {
   return type_->Signature() + " " + name_;
+}
+
+std::string AidlVariableDeclaration::ValueString() const {
+  return GetDefaultValue()->As(GetType());
 }
 
 AidlArgument::AidlArgument(const AidlLocation& location, AidlArgument::Direction direction,
@@ -272,46 +275,41 @@ std::string AidlArgument::Signature() const {
 
 AidlMember::AidlMember(const AidlLocation& location) : AidlNode(location) {}
 
-string AidlConstantValue::ToString(Type type) {
-  switch (type) {
-    case Type::INTEGER:
-      return "int";
-    case Type::STRING:
-      return "String";
-    case Type::ERROR:
-      LOG(FATAL) << "aidl internal error: error type failed to halt program";
-    default:
-      LOG(FATAL) << "aidl internal error: unknown constant type: " << static_cast<int>(type);
-      return "";  // not reached
-  }
-}
-
 AidlConstantValue::AidlConstantValue(const AidlLocation& location, Type type,
                                      const std::string& checked_value)
     : AidlNode(location), type_(type), value_(checked_value) {}
 
-AidlConstantValue* AidlConstantValue::LiteralInt(const AidlLocation& location, int32_t value) {
-  return new AidlConstantValue(location, Type::INTEGER, std::to_string(value));
+static bool isValidLiteralChar(char c) {
+  return !(c <= 0x1f ||  // control characters are < 0x20
+           c >= 0x7f ||  // DEL is 0x7f
+           c == '\\');   // Disallow backslashes for future proofing.
 }
 
-AidlConstantValue* AidlConstantValue::ParseHex(const AidlLocation& location,
-                                               const std::string& value) {
-  uint32_t unsigned_value;
-  if (!android::base::ParseUint<uint32_t>(value.c_str(), &unsigned_value)) {
-    AIDL_ERROR(location) << "Found invalid int value '" << value << "'";
+AidlConstantValue* AidlConstantValue::Boolean(const AidlLocation& location, bool value) {
+  return new AidlConstantValue(location, Type::BOOLEAN, value ? "true" : "false");
+}
+
+AidlConstantValue* AidlConstantValue::Character(const AidlLocation& location, char value) {
+  if (!isValidLiteralChar(value)) {
+    AIDL_ERROR(location) << "Invalid character literal " << value;
     return new AidlConstantValue(location, Type::ERROR, "");
   }
-
-  return LiteralInt(location, unsigned_value);
+  return new AidlConstantValue(location, Type::CHARACTER, std::string("'") + value + "'");
 }
 
-AidlConstantValue* AidlConstantValue::ParseString(const AidlLocation& location,
-                                                  const std::string& value) {
+AidlConstantValue* AidlConstantValue::Hex(const AidlLocation& location, const std::string& value) {
+  return new AidlConstantValue(location, Type::HEXIDECIMAL, value);
+}
+
+AidlConstantValue* AidlConstantValue::Integral(const AidlLocation& location,
+                                               const std::string& value) {
+  return new AidlConstantValue(location, Type::INTEGRAL, value);
+}
+
+AidlConstantValue* AidlConstantValue::String(const AidlLocation& location,
+                                             const std::string& value) {
   for (size_t i = 0; i < value.length(); ++i) {
-    const char& c = value[i];
-    if (c <= 0x1f || // control characters are < 0x20
-        c >= 0x7f || // DEL is 0x7f
-        c == '\\') { // Disallow backslashes for future proofing.
+    if (!isValidLiteralChar(value[i])) {
       AIDL_ERROR(location) << "Found invalid character at index " << i << " in string constant '"
                            << value << "'";
       return new AidlConstantValue(location, Type::ERROR, "");
@@ -321,9 +319,85 @@ AidlConstantValue* AidlConstantValue::ParseString(const AidlLocation& location,
   return new AidlConstantValue(location, Type::STRING, value);
 }
 
-string AidlConstantValue::ToString() const {
-  CHECK(type_ != Type::ERROR) << "aidl internal error: error should be checked " << value_;
-  return value_;
+bool AidlConstantValue::CheckValid() const {
+  // error always logged during creation
+  return type_ != AidlConstantValue::Type::ERROR;
+}
+
+string AidlConstantValue::As(const AidlTypeSpecifier& type) const {
+  const std::string type_string = type.ToString();
+
+  switch (type_) {
+    case AidlConstantValue::Type::INTEGRAL:
+      if (type_string == "byte") {
+        if (!android::base::ParseInt<int8_t>(value_, nullptr)) goto parse_error;
+        return value_;
+      }
+      if (type_string == "int") {
+        if (!android::base::ParseInt<int32_t>(value_, nullptr)) goto parse_error;
+        return value_;
+      }
+      if (type_string == "long") {
+        if (!android::base::ParseInt<int64_t>(value_, nullptr)) goto parse_error;
+        return value_;
+      }
+      goto mismatch_error;
+    case AidlConstantValue::Type::HEXIDECIMAL:
+      // For historical reasons, a hexidecimal int needs to have the specified bits interpreted
+      // as the signed type, so the other types are made consistent with it.
+      if (type_string == "byte") {
+        uint8_t unsigned_value;
+        if (!android::base::ParseUint<uint8_t>(value_, &unsigned_value)) goto parse_error;
+        return std::to_string((int8_t)unsigned_value);
+      }
+      if (type_string == "int") {
+        uint32_t unsigned_value;
+        if (!android::base::ParseUint<uint32_t>(value_, &unsigned_value)) goto parse_error;
+        return std::to_string((int32_t)unsigned_value);
+      }
+      if (type_string == "long") {
+        uint64_t unsigned_value;
+        if (!android::base::ParseUint<uint64_t>(value_, &unsigned_value)) goto parse_error;
+        return std::to_string((int64_t)unsigned_value);
+      }
+      goto mismatch_error;
+    case AidlConstantValue::Type::BOOLEAN:
+      if (type_string == "boolean") return value_;
+      goto mismatch_error;
+    case AidlConstantValue::Type::CHARACTER:
+      if (type_string == "char") return value_;
+      goto mismatch_error;
+    case AidlConstantValue::Type::STRING:
+      if (type_string == "String") return value_;
+      goto mismatch_error;
+    default:
+      AIDL_FATAL(this) << "Unrecognized constant value type";
+  }
+
+mismatch_error:
+  AIDL_ERROR(this) << "Type is declared " << type_string << " but constant is " << ToString(type_);
+  return "";
+parse_error:
+  AIDL_ERROR(this) << "Could not parse " << value_ << " as " << type_string;
+  return "";
+}
+
+string AidlConstantValue::ToString(Type type) {
+  switch (type) {
+    case Type::BOOLEAN:
+      return "a literal boolean";
+    case Type::CHARACTER:
+      return "a literal char";
+    case Type::INTEGRAL:
+      return "an integral literal";
+    case Type::STRING:
+      return "a literal string";
+    case Type::ERROR:
+      LOG(FATAL) << "aidl internal error: error type failed to halt program";
+    default:
+      LOG(FATAL) << "aidl internal error: unknown constant type: " << static_cast<int>(type);
+      return "";  // not reached
+  }
 }
 
 AidlConstantDeclaration::AidlConstantDeclaration(const AidlLocation& location,
@@ -332,16 +406,18 @@ AidlConstantDeclaration::AidlConstantDeclaration(const AidlLocation& location,
     : AidlMember(location), type_(type), name_(name), value_(value) {}
 
 bool AidlConstantDeclaration::CheckValid() const {
-  // Error message logged above
-  if (value_->GetType() == AidlConstantValue::Type::ERROR) return false;
+  bool valid = true;
+  valid &= type_->CheckValid();
+  valid &= value_->CheckValid();
+  if (!valid) return false;
 
-  if (type_->ToString() != AidlConstantValue::ToString(value_->GetType())) {
-    AIDL_ERROR(this) << "Constant " << name_ << " is of type " << type_->ToString()
-                     << " but value is of type " << AidlConstantValue::ToString(value_->GetType());
+  const static set<string> kSupportedConstTypes = {"String", "int"};
+  if (kSupportedConstTypes.find(type_->ToString()) == kSupportedConstTypes.end()) {
+    AIDL_ERROR(this) << "Constant of type " << type_->ToString() << " is not supported.";
     return false;
   }
 
-  return true;
+  return !ValueString().empty();
 }
 
 AidlMethod::AidlMethod(const AidlLocation& location, bool oneway, AidlTypeSpecifier* type,
@@ -350,11 +426,6 @@ AidlMethod::AidlMethod(const AidlLocation& location, bool oneway, AidlTypeSpecif
     : AidlMethod(location, oneway, type, name, args, comments, 0, true) {
   has_id_ = false;
 }
-
-AidlMethod::AidlMethod(const AidlLocation& location, bool oneway, AidlTypeSpecifier* type,
-                       const std::string& name, std::vector<std::unique_ptr<AidlArgument>>* args,
-                       const std::string& comments, int id)
-    : AidlMethod(location, oneway, type, name, args, comments, id, true) {}
 
 AidlMethod::AidlMethod(const AidlLocation& location, bool oneway, AidlTypeSpecifier* type,
                        const std::string& name, std::vector<std::unique_ptr<AidlArgument>>* args,
@@ -494,47 +565,25 @@ void AidlQualifiedName::AddTerm(const std::string& term) {
 AidlImport::AidlImport(const AidlLocation& location, const std::string& needed_class)
     : AidlNode(location), needed_class_(needed_class) {}
 
-Parser::Parser(const IoDelegate& io_delegate, android::aidl::AidlTypenames& typenames)
-    : io_delegate_(io_delegate), typenames_(typenames) {
-  yylex_init(&scanner_);
-}
-
-Parser::~Parser() {
-  if (raw_buffer_) {
-    yy_delete_buffer(buffer_, scanner_);
-    raw_buffer_.reset();
-  }
-  yylex_destroy(scanner_);
-}
-
-bool Parser::ParseFile(const string& filename) {
+std::unique_ptr<Parser> Parser::Parse(const std::string& filename,
+                                      const android::aidl::IoDelegate& io_delegate,
+                                      AidlTypenames& typenames) {
   // Make sure we can read the file first, before trashing previous state.
-  unique_ptr<string> new_buffer = io_delegate_.GetFileContents(filename);
-  if (!new_buffer) {
+  unique_ptr<string> raw_buffer = io_delegate.GetFileContents(filename);
+  if (raw_buffer == nullptr) {
     AIDL_ERROR(filename) << "Error while opening file for parsing";
-    return false;
+    return nullptr;
   }
 
-  // Throw away old parsing state if we have any.
-  if (raw_buffer_) {
-    yy_delete_buffer(buffer_, scanner_);
-    raw_buffer_.reset();
-  }
-
-  raw_buffer_ = std::move(new_buffer);
   // We're going to scan this buffer in place, and yacc demands we put two
   // nulls at the end.
-  raw_buffer_->append(2u, '\0');
-  filename_ = filename;
-  package_.reset();
-  error_ = 0;
+  raw_buffer->append(2u, '\0');
 
-  buffer_ = yy_scan_buffer(&(*raw_buffer_)[0], raw_buffer_->length(), scanner_);
+  std::unique_ptr<Parser> parser(new Parser(filename, *raw_buffer, typenames));
 
-  if (yy::parser(this).parse() != 0 || error_ != 0)
-    return false;
+  if (yy::parser(parser.get()).parse() != 0 || parser->HasError()) return nullptr;
 
-  return true;
+  return parser;
 }
 
 std::vector<std::string> Parser::Package() const {
@@ -558,4 +607,16 @@ bool Parser::Resolve() {
     }
   }
   return success;
+}
+
+Parser::Parser(const std::string& filename, std::string& raw_buffer,
+               android::aidl::AidlTypenames& typenames)
+    : filename_(filename), typenames_(typenames) {
+  yylex_init(&scanner_);
+  buffer_ = yy_scan_buffer(&raw_buffer[0], raw_buffer.length(), scanner_);
+}
+
+Parser::~Parser() {
+  yy_delete_buffer(buffer_, scanner_);
+  yylex_destroy(scanner_);
 }

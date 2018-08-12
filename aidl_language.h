@@ -43,9 +43,6 @@ class AidlLocation {
     unsigned int column;
   };
 
-  // For tests
-  static AidlLocation nowhere() { return {"nowhere", {0, 0}, {0, 0}}; }
-
   AidlLocation(const std::string& file, Point begin, Point end);
 
   friend std::ostream& operator<<(std::ostream& os, const AidlLocation& l);
@@ -55,6 +52,11 @@ class AidlLocation {
   Point begin_;
   Point end_;
 };
+
+#define AIDL_LOCATION_HERE                   \
+  AidlLocation {                             \
+    __FILE__, {__LINE__, 0}, { __LINE__, 0 } \
+  }
 
 std::ostream& operator<<(std::ostream& os, const AidlLocation& l);
 
@@ -129,6 +131,9 @@ class AidlAnnotation : public AidlNode {
   const string name_;
 };
 
+bool operator==(const unique_ptr<AidlAnnotation>& lhs,
+                const unique_ptr<AidlAnnotation>& rhs);
+
 class AidlAnnotatable : public AidlNode {
  public:
   AidlAnnotatable(const AidlLocation& location);
@@ -141,6 +146,10 @@ class AidlAnnotatable : public AidlNode {
   bool IsUtf8() const;
   bool IsUtf8InCpp() const;
   std::string ToString() const;
+
+  const set<unique_ptr<AidlAnnotation>>& GetAnnotations() const {
+    return annotations_;
+  }
 
  private:
   set<unique_ptr<AidlAnnotation>> annotations_;
@@ -233,6 +242,8 @@ class AidlVariableDeclaration : public AidlNode {
   std::string ToString() const;
   std::string Signature() const;
 
+  std::string ValueString() const;
+
  private:
   std::unique_ptr<AidlTypeSpecifier> type_;
   std::string name_;
@@ -254,12 +265,12 @@ class AidlArgument : public AidlVariableDeclaration {
   bool IsOut() const { return direction_ & OUT_DIR; }
   bool IsIn() const { return direction_ & IN_DIR; }
   bool DirectionWasSpecified() const { return direction_specified_; }
+  string GetDirectionSpecifier() const;
 
   std::string ToString() const;
   std::string Signature() const;
 
  private:
-  string GetDirectionSpecifier() const;
   Direction direction_;
   bool direction_specified_;
 
@@ -282,22 +293,27 @@ class AidlMember : public AidlNode {
 
 class AidlConstantValue : public AidlNode {
  public:
-  enum class Type { ERROR, INTEGER, STRING };
-  static string ToString(Type type);
+  enum class Type { ERROR, BOOLEAN, CHARACTER, HEXIDECIMAL, INTEGRAL, STRING };
 
   virtual ~AidlConstantValue() = default;
 
-  static AidlConstantValue* LiteralInt(const AidlLocation& location, const int32_t value);
+  static AidlConstantValue* Boolean(const AidlLocation& location, bool value);
+  static AidlConstantValue* Character(const AidlLocation& location, char value);
   // example: "0x4f"
-  static AidlConstantValue* ParseHex(const AidlLocation& location, const std::string& value);
+  static AidlConstantValue* Hex(const AidlLocation& location, const std::string& value);
+  // example: 123, -5498, maybe any size
+  static AidlConstantValue* Integral(const AidlLocation& location, const std::string& value);
   // example: "\"asdf\""
-  static AidlConstantValue* ParseString(const AidlLocation& location, const std::string& value);
+  static AidlConstantValue* String(const AidlLocation& location, const std::string& value);
 
   Type GetType() const { return type_; }
-  string ToString() const;
+
+  bool CheckValid() const;
+  string As(const AidlTypeSpecifier& type) const;
 
  private:
   AidlConstantValue(const AidlLocation& location, Type type, const std::string& checked_value);
+  static string ToString(Type type);
 
   const Type type_ = Type::ERROR;
   const std::string value_;
@@ -316,6 +332,8 @@ class AidlConstantDeclaration : public AidlMember {
   const AidlConstantValue& GetValue() const { return *value_; }
   bool CheckValid() const;
 
+  string ValueString() const { return GetValue().As(GetType()); }
+
   AidlConstantDeclaration* AsConstantDeclaration() override { return this; }
 
  private:
@@ -333,10 +351,7 @@ class AidlMethod : public AidlMember {
              const std::string& comments);
   AidlMethod(const AidlLocation& location, bool oneway, AidlTypeSpecifier* type,
              const std::string& name, std::vector<std::unique_ptr<AidlArgument>>* args,
-             const std::string& comments, int id);
-  AidlMethod(const AidlLocation& location, bool oneway, AidlTypeSpecifier* type,
-             const std::string& name, std::vector<std::unique_ptr<AidlArgument>>* args,
-             const std::string& comments, int id, bool is_user_defined);
+             const std::string& comments, int id, bool is_user_defined = true);
   virtual ~AidlMethod() = default;
 
   AidlMethod* AsMethod() override { return this; }
@@ -567,13 +582,15 @@ class AidlImport : public AidlNode {
 
 class Parser {
  public:
-  explicit Parser(const android::aidl::IoDelegate& io_delegate, AidlTypenames& typenames);
   ~Parser();
 
-  // Parse contents of file |filename|.
-  bool ParseFile(const std::string& filename);
+  // Parse contents of file |filename|. Should only be called once.
+  static std::unique_ptr<Parser> Parse(const std::string& filename,
+                                       const android::aidl::IoDelegate& io_delegate,
+                                       AidlTypenames& typenames);
 
   void AddError() { error_++; }
+  bool HasError() { return error_ != 0; }
 
   const std::string& FileName() const { return filename_; }
   void* Scanner() const { return scanner_; }
@@ -589,6 +606,9 @@ class Parser {
 
   void SetPackage(unique_ptr<AidlQualifiedName> name) { package_ = std::move(name); }
   std::vector<std::string> Package() const;
+
+  void SetAsApiDump() { is_apidump_ = true; }
+  bool IsApiDump() const { return is_apidump_; }
 
   void DeferResolution(AidlTypeSpecifier* typespec) {
     unresolved_typespecs_.emplace_back(typespec);
@@ -610,15 +630,19 @@ class Parser {
   vector<AidlDefinedType*>& GetDefinedTypes() { return defined_types_; }
 
  private:
-  const android::aidl::IoDelegate& io_delegate_;
-  int error_ = 0;
+  explicit Parser(const std::string& filename, std::string& raw_buffer,
+                  android::aidl::AidlTypenames& typenames);
+
   std::string filename_;
   std::unique_ptr<AidlQualifiedName> package_;
-  void* scanner_ = nullptr;
-  std::vector<std::unique_ptr<AidlImport>> imports_;
-  std::unique_ptr<std::string> raw_buffer_;
-  YY_BUFFER_STATE buffer_;
   AidlTypenames& typenames_;
+  bool is_apidump_ = false;
+
+  void* scanner_ = nullptr;
+  YY_BUFFER_STATE buffer_;
+  int error_ = 0;
+
+  std::vector<std::unique_ptr<AidlImport>> imports_;
   vector<AidlDefinedType*> defined_types_;
   vector<AidlTypeSpecifier*> unresolved_typespecs_;
 

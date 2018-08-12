@@ -249,6 +249,7 @@ bool write_dep_file(const Options& options, const AidlDefinedType& defined_type,
   if (dep_file_name.empty()) {
     return true;  // nothing to do
   }
+
   CodeWriterPtr writer = io_delegate.GetCodeWriter(dep_file_name);
   if (!writer) {
     LOG(ERROR) << "Could not open dependency file: " << dep_file_name;
@@ -280,7 +281,7 @@ bool write_dep_file(const Options& options, const AidlDefinedType& defined_type,
       using ::android::aidl::cpp::HeaderFile;
       vector<string> headers;
       for (ClassNames c : {ClassNames::CLIENT, ClassNames::SERVER, ClassNames::INTERFACE}) {
-        headers.push_back(options.OutputHeaderDir() + '/' +
+        headers.push_back(options.OutputHeaderDir() +
                           HeaderFile(defined_type, c, false /* use_os_sep */));
       }
 
@@ -299,7 +300,6 @@ string generate_outputFileName(const Options& options, const AidlDefinedType& de
   // create the path to the destination folder based on the
   // defined_type package name
   string result = options.OutputDir();
-  result += OS_PATH_SEPARATOR;
 
   string package = defined_type.GetPackage();
   size_t len = package.length();
@@ -315,7 +315,14 @@ string generate_outputFileName(const Options& options, const AidlDefinedType& de
   const string& name = defined_type.GetName();
   result += OS_PATH_SEPARATOR;
   result.append(name, 0, name.find('.'));
-  result += ".java";
+  if (options.TargetLanguage() == Options::Language::JAVA) {
+    result += ".java";
+  } else if (options.TargetLanguage() == Options::Language::CPP) {
+    result += ".cpp";
+  } else {
+    LOG(FATAL) << "Should not reach here" << endl;
+    return "";
+  }
 
   return result;
 }
@@ -507,11 +514,12 @@ AidlError load_and_validate_aidl(const std::string& input_file_name, const Optio
   //////////////////////////////////////////////////////////////////////////
 
   // Parse the main input file
-  Parser main_parser{io_delegate, types->typenames_};
-  if (!main_parser.ParseFile(input_file_name)) {
+  std::unique_ptr<Parser> main_parser =
+      Parser::Parse(input_file_name, io_delegate, types->typenames_);
+  if (main_parser == nullptr) {
     return AidlError::PARSE_ERROR;
   }
-  if (!types->AddDefinedTypes(main_parser.GetDefinedTypes(), input_file_name)) {
+  if (!types->AddDefinedTypes(main_parser->GetDefinedTypes(), input_file_name)) {
     return AidlError::BAD_TYPE;
   }
 
@@ -528,7 +536,7 @@ AidlError load_and_validate_aidl(const std::string& input_file_name, const Optio
   // Find files to import and parse them
   vector<string> imports;
   ImportResolver import_resolver{io_delegate, options.ImportPaths(), options.InputFiles()};
-  for (const auto& import : main_parser.GetImports()) {
+  for (const auto& import : main_parser->GetImports()) {
     if (types->HasImportType(*import)) {
       // There are places in the Android tree where an import doesn't resolve,
       // but we'll pick the type up through the preprocessed types.
@@ -544,14 +552,15 @@ AidlError load_and_validate_aidl(const std::string& input_file_name, const Optio
 
     imports.emplace_back(import_path);
 
-    Parser import_parser{io_delegate, types->typenames_};
-    if (!import_parser.ParseFile(import_path)) {
+    std::unique_ptr<Parser> import_parser =
+        Parser::Parse(import_path, io_delegate, types->typenames_);
+    if (import_parser == nullptr) {
       cerr << "error while importing " << import_path << " for " << import->GetNeededClass()
            << endl;
       err = AidlError::BAD_IMPORT;
       continue;
     }
-    if (!types->AddDefinedTypes(import_parser.GetDefinedTypes(), import_path)) {
+    if (!types->AddDefinedTypes(import_parser->GetDefinedTypes(), import_path)) {
       return AidlError::BAD_TYPE;
     }
   }
@@ -563,15 +572,26 @@ AidlError load_and_validate_aidl(const std::string& input_file_name, const Optio
   // Validation phase
   //////////////////////////////////////////////////////////////////////////
 
+  if (options.GetTask() == Options::Task::CHECK_API && !main_parser->IsApiDump()) {
+    AIDL_ERROR(input_file_name) << "Input is not an API dump";
+    return AidlError::BAD_INPUT;
+  }
+
+  if (options.GetTask() != Options::Task::CHECK_API && main_parser->IsApiDump()) {
+    AIDL_ERROR(input_file_name) << "Input is not AIDL source code, but "
+                                << "an AIDL dump file";
+    return AidlError::BAD_INPUT;
+  }
+
   // Resolve the unresolved type references found from the input file
-  if (!main_parser.Resolve()) {
+  if (!main_parser->Resolve()) {
     return AidlError::BAD_TYPE;
   }
 
   // Make sure that there is no unstructured parcelable in the input file,
   // because we can generate code only for structured parcelables.
   bool has_only_unstructured_parcelables = true;
-  for (const auto defined_type : main_parser.GetDefinedTypes()) {
+  for (const auto defined_type : main_parser->GetDefinedTypes()) {
     if (defined_type->AsStructuredParcelable() != nullptr ||
         defined_type->AsInterface() != nullptr) {
       has_only_unstructured_parcelables = false;
@@ -582,14 +602,14 @@ AidlError load_and_validate_aidl(const std::string& input_file_name, const Optio
 
     // return this so that dependency file can be created
     if (defined_types != nullptr) {
-      *defined_types = main_parser.GetDefinedTypes();
+      *defined_types = main_parser->GetDefinedTypes();
     }
 
     return AidlError::FOUND_PARCELABLE;
   }
 
-  const int num_defined_types = main_parser.GetDefinedTypes().size();
-  for (const auto defined_type : main_parser.GetDefinedTypes()) {
+  const int num_defined_types = main_parser->GetDefinedTypes().size();
+  for (const auto defined_type : main_parser->GetDefinedTypes()) {
     // Ensure that a type is either an interface or a structured parcelable
     AidlInterface* interface = defined_type->AsInterface();
     AidlStructuredParcelable* parcelable = defined_type->AsStructuredParcelable();
@@ -598,7 +618,8 @@ AidlError load_and_validate_aidl(const std::string& input_file_name, const Optio
     // Ensure that foo.bar.IFoo is defined in <some_path>/foo/bar/IFoo.aidl
     // Do this only when there is only one type defined in the input file.
     // When there are multiple types in a file, we can't satisfy the convention.
-    if (num_defined_types == 1 && !check_filename(input_file_name, *defined_type)) {
+    if (options.GetTask() != Options::Task::CHECK_API && num_defined_types == 1 &&
+        !check_filename(input_file_name, *defined_type)) {
       return AidlError::BAD_PACKAGE;
     }
 
@@ -628,10 +649,10 @@ AidlError load_and_validate_aidl(const std::string& input_file_name, const Optio
       // add the meta-method 'int getInterfaceVersion()' if version is specified.
       if (options.Version() > 0) {
         AidlTypeSpecifier* ret =
-            new AidlTypeSpecifier(AidlLocation::nowhere(), "int", false, nullptr, "");
+            new AidlTypeSpecifier(AIDL_LOCATION_HERE, "int", false, nullptr, "");
         vector<unique_ptr<AidlArgument>>* args = new vector<unique_ptr<AidlArgument>>();
         AidlMethod* method =
-            new AidlMethod(AidlLocation::nowhere(), false, ret, "getInterfaceVersion", args, "",
+            new AidlMethod(AIDL_LOCATION_HERE, false, ret, "getInterfaceVersion", args, "",
                            kGetInterfaceVersionId, false /* is_user_defined */);
         interface->GetMutableMethods().emplace_back(method);
       }
@@ -658,7 +679,7 @@ AidlError load_and_validate_aidl(const std::string& input_file_name, const Optio
   }
 
   if (defined_types != nullptr) {
-    *defined_types = main_parser.GetDefinedTypes();
+    *defined_types = main_parser->GetDefinedTypes();
   }
 
   if (imported_files != nullptr) {
@@ -717,22 +738,10 @@ int compile_aidl(const Options& options, const IoDelegate& io_delegate) {
       string output_file_name = options.OutputFile();
       // if needed, generate the output file name from the base folder
       if (output_file_name.empty() && !options.OutputDir().empty()) {
-        if (lang == Options::Language::CPP) {
-          // For C++, output file is <out_dir>/IFoo.cpp
-          output_file_name =
-              options.OutputDir() + OS_PATH_SEPARATOR + defined_type->GetName() + ".cpp";
-          // For Java, output file is <out_dir>/path/to/package/IFoo.java
-        } else if (lang == Options::Language::JAVA) {
-          output_file_name = generate_outputFileName(options, *defined_type);
-        } else {
-          LOG(FATAL) << "Should not reach here" << endl;
+        output_file_name = generate_outputFileName(options, *defined_type);
+        if (output_file_name.empty()) {
           return 1;
         }
-      }
-
-      // make sure the folders of the output file all exists
-      if (!io_delegate.CreatePathForFile(output_file_name)) {
-        return 1;
       }
 
       if (!write_dep_file(options, *defined_type, imported_files, io_delegate, input_file,
@@ -764,12 +773,10 @@ bool preprocess_aidl(const Options& options, const IoDelegate& io_delegate) {
 
   for (const auto& file : options.InputFiles()) {
     AidlTypenames typenames;
-    Parser p{io_delegate, typenames};
-    if (!p.ParseFile(file))
-      return false;
-    string line;
+    std::unique_ptr<Parser> p = Parser::Parse(file, io_delegate, typenames);
+    if (p == nullptr) return false;
 
-    for (const auto& defined_type : p.GetDefinedTypes()) {
+    for (const auto& defined_type : p->GetDefinedTypes()) {
       if (!writer->Write("%s %s;\n", defined_type->GetPreprocessDeclarationName().c_str(),
                          defined_type->GetCanonicalName().c_str())) {
         return false;

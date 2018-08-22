@@ -47,12 +47,12 @@ AidlLocation loc(const yy::parser::location_type& l) {
     char character;
     std::string *str;
     AidlAnnotation* annotation;
-    std::set<std::unique_ptr<AidlAnnotation>>* annotation_list;
+    std::set<AidlAnnotation>* annotation_list;
     AidlTypeSpecifier* type;
-    AidlTypeSpecifier* unannotated_type;
     AidlArgument* arg;
     AidlArgument::Direction direction;
     AidlConstantValue* constant_value;
+    std::vector<std::unique_ptr<AidlConstantValue>>* constant_value_list;
     std::vector<std::unique_ptr<AidlArgument>>* arg_list;
     AidlVariableDeclaration* variable;
     std::vector<std::unique_ptr<AidlVariableDeclaration>>* variable_list;
@@ -102,13 +102,15 @@ AidlLocation loc(const yy::parser::location_type& l) {
 %type<annotation> annotation
 %type<annotation_list>annotation_list
 %type<type> type
-%type<unannotated_type> unannotated_type
+%type<type> unannotated_type
 %type<arg_list> arg_list
 %type<arg> arg
 %type<direction> direction
 %type<type_args> type_args
 %type<qname> qualified_name
 %type<constant_value> constant_value
+%type<constant_value_list> constant_value_list
+%type<constant_value_list> constant_value_non_empty_list
 
 %type<token> identifier error
 %%
@@ -221,7 +223,8 @@ parcelable_decl
 
 variable_decls
  : /* empty */ {
-    $$ = new std::vector<std::unique_ptr<AidlVariableDeclaration>>; }
+    $$ = new std::vector<std::unique_ptr<AidlVariableDeclaration>>;
+ }
  | variable_decls variable_decl {
     $$ = $1;
     if ($2 != nullptr) {
@@ -293,6 +296,30 @@ constant_value
     $$ = AidlConstantValue::String(loc(@1), $1->GetText());
     delete $1;
   }
+ | '{' constant_value_list '}' {
+    $$ = AidlConstantValue::Array(loc(@1), $2);
+    delete $2;
+  }
+ ;
+
+constant_value_list
+ : /* empty */ {
+    $$ = new std::vector<std::unique_ptr<AidlConstantValue>>;
+ }
+ | constant_value_non_empty_list {
+    $$ = $1;
+ }
+ ;
+
+constant_value_non_empty_list
+ : constant_value {
+    $$ = new std::vector<std::unique_ptr<AidlConstantValue>>;
+    $$->push_back(std::unique_ptr<AidlConstantValue>($1));
+ }
+ | constant_value_non_empty_list ',' constant_value {
+    $$ = $1;
+    $$->push_back(std::unique_ptr<AidlConstantValue>($3));
+ }
  ;
 
 constant_decl
@@ -382,11 +409,12 @@ type_args
 
 annotation_list
  :
-  { $$ = new std::set<unique_ptr<AidlAnnotation>>(); }
+  { $$ = new std::set<AidlAnnotation>(); }
  | annotation_list annotation
   {
     if ($2 != nullptr) {
-      $1->insert(std::unique_ptr<AidlAnnotation>($2));
+      $1->insert(std::move(*$2));
+      delete $2;
     }
   };
 

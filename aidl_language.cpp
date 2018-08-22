@@ -92,18 +92,13 @@ AidlAnnotation* AidlAnnotation::Parse(const AidlLocation& location, const string
 AidlAnnotation::AidlAnnotation(const AidlLocation& location, const string& name)
     : AidlNode(location), name_(name) {}
 
-static bool HasAnnotation(const set<unique_ptr<AidlAnnotation>>& annotations, const string& name) {
+static bool HasAnnotation(const set<AidlAnnotation>& annotations, const string& name) {
   for (const auto& a : annotations) {
-    if (a->GetName() == name) {
+    if (a.GetName() == name) {
       return true;
     }
   }
   return false;
-}
-
-bool operator==(const unique_ptr<AidlAnnotation>& lhs,
-                const unique_ptr<AidlAnnotation>& rhs) {
-  return lhs->GetName() == rhs->GetName();
 }
 
 AidlAnnotatable::AidlAnnotatable(const AidlLocation& location) : AidlNode(location) {}
@@ -123,7 +118,7 @@ bool AidlAnnotatable::IsUtf8InCpp() const {
 string AidlAnnotatable::ToString() const {
   vector<string> ret;
   for (const auto& a : annotations_) {
-    ret.emplace_back(a->ToString());
+    ret.emplace_back(a.ToString());
   }
   std::sort(ret.begin(), ret.end());
   return Join(ret, " ");
@@ -138,6 +133,14 @@ AidlTypeSpecifier::AidlTypeSpecifier(const AidlLocation& location, const string&
       is_array_(is_array),
       type_params_(type_params),
       comments_(comments) {}
+
+AidlTypeSpecifier AidlTypeSpecifier::ArrayBase() const {
+  AIDL_FATAL_IF(!is_array_, this);
+
+  AidlTypeSpecifier arrayBase = *this;
+  arrayBase.is_array_ = false;
+  return arrayBase;
+}
 
 string AidlTypeSpecifier::ToString() const {
   string ret = GetName();
@@ -193,6 +196,11 @@ bool AidlTypeSpecifier::CheckValid() const {
   return true;
 }
 
+std::string AidlConstantValueDecorator(const AidlTypeSpecifier& /*type*/,
+                                       const std::string& raw_value) {
+  return raw_value;
+}
+
 AidlVariableDeclaration::AidlVariableDeclaration(const AidlLocation& location,
                                                  AidlTypeSpecifier* type, const std::string& name)
     : AidlVariableDeclaration(location, type, name, nullptr /*default_value*/) {}
@@ -211,13 +219,13 @@ bool AidlVariableDeclaration::CheckValid() const {
 
   if (!valid) return false;
 
-  return !ValueString().empty();
+  return !ValueString(AidlConstantValueDecorator).empty();
 }
 
 string AidlVariableDeclaration::ToString() const {
   string ret = type_->ToString() + " " + name_;
   if (default_value_ != nullptr) {
-    ret += " = " + ValueString();
+    ret += " = " + ValueString(AidlConstantValueDecorator);
   }
   return ret;
 }
@@ -226,8 +234,8 @@ string AidlVariableDeclaration::Signature() const {
   return type_->Signature() + " " + name_;
 }
 
-std::string AidlVariableDeclaration::ValueString() const {
-  return GetDefaultValue()->As(GetType());
+std::string AidlVariableDeclaration::ValueString(const ConstantValueDecorator& decorator) const {
+  return GetDefaultValue()->As(GetType(), decorator);
 }
 
 AidlArgument::AidlArgument(const AidlLocation& location, AidlArgument::Direction direction,
@@ -280,7 +288,12 @@ AidlConstantValue::AidlConstantValue(const AidlLocation& location, Type type,
                                      const std::string& checked_value)
     : AidlNode(location), type_(type), value_(checked_value) {
   CHECK(!value_.empty() || type_ == Type::ERROR);
+  CHECK(type_ != Type::ARRAY);
 }
+
+AidlConstantValue::AidlConstantValue(const AidlLocation& location, Type type,
+                                     std::vector<std::unique_ptr<AidlConstantValue>>* values)
+    : AidlNode(location), type_(type), values_(std::move(*values)) {}
 
 static bool isValidLiteralChar(char c) {
   return !(c <= 0x1f ||  // control characters are < 0x20
@@ -314,6 +327,11 @@ AidlConstantValue* AidlConstantValue::Integral(const AidlLocation& location,
   return new AidlConstantValue(location, Type::INTEGRAL, value);
 }
 
+AidlConstantValue* AidlConstantValue::Array(
+    const AidlLocation& location, std::vector<std::unique_ptr<AidlConstantValue>>* values) {
+  return new AidlConstantValue(location, Type::ARRAY, values);
+}
+
 AidlConstantValue* AidlConstantValue::String(const AidlLocation& location,
                                              const std::string& value) {
   for (size_t i = 0; i < value.length(); ++i) {
@@ -340,15 +358,43 @@ static string TrimIfSuffix(const string& str, const string& suffix) {
   return str;
 }
 
-string AidlConstantValue::As(const AidlTypeSpecifier& type) const {
-  const std::string type_string = type.ToString();
+string AidlConstantValue::As(const AidlTypeSpecifier& type,
+                             const ConstantValueDecorator& decorator) const {
+  if (type.IsGeneric()) {
+    AIDL_ERROR(type) << "Generic type cannot be specified with a constant literal.";
+    return "";
+  }
+
+  const std::string& type_string = type.GetName();
+
+  if ((type_ == Type::ARRAY) != type.IsArray()) {
+    goto mismatch_error;
+  }
 
   switch (type_) {
+    case AidlConstantValue::Type::ARRAY: {
+      vector<string> raw_values;
+      raw_values.reserve(values_.size());
+
+      bool success = true;
+      for (const auto& value : values_) {
+        const AidlTypeSpecifier& array_base = type.ArrayBase();
+        const std::string raw_value = value->As(array_base, decorator);
+
+        success &= !raw_value.empty();
+        raw_values.push_back(decorator(array_base, raw_value));
+      }
+      if (!success) {
+        AIDL_ERROR(this) << "Default value must be a literal array of " << type_string << ".";
+        return "";
+      }
+      return decorator(type, "{" + Join(raw_values, ", ") + "}");
+    }
     case AidlConstantValue::Type::BOOLEAN:
-      if (type_string == "boolean") return value_;
+      if (type_string == "boolean") return decorator(type, value_);
       goto mismatch_error;
     case AidlConstantValue::Type::CHARACTER:
-      if (type_string == "char") return value_;
+      if (type_string == "char") return decorator(type, value_);
       goto mismatch_error;
     case AidlConstantValue::Type::FLOATING: {
       bool is_float_literal = value_.back() == 'f';
@@ -357,12 +403,12 @@ string AidlConstantValue::As(const AidlTypeSpecifier& type) const {
       if (type_string == "double") {
         double parsed_value;
         if (!android::base::ParseDouble(raw_value, &parsed_value)) goto parse_error;
-        return std::to_string(parsed_value);
+        return decorator(type, std::to_string(parsed_value));
       }
       if (is_float_literal && type_string == "float") {
         float parsed_value;
         if (!android::base::ParseFloat(raw_value, &parsed_value)) goto parse_error;
-        return std::to_string(parsed_value) + "f";
+        return decorator(type, std::to_string(parsed_value) + "f");
       }
       goto mismatch_error;
     }
@@ -372,42 +418,42 @@ string AidlConstantValue::As(const AidlTypeSpecifier& type) const {
       if (type_string == "byte") {
         uint8_t unsigned_value;
         if (!android::base::ParseUint<uint8_t>(value_, &unsigned_value)) goto parse_error;
-        return std::to_string((int8_t)unsigned_value);
+        return decorator(type, std::to_string((int8_t)unsigned_value));
       }
       if (type_string == "int") {
         uint32_t unsigned_value;
         if (!android::base::ParseUint<uint32_t>(value_, &unsigned_value)) goto parse_error;
-        return std::to_string((int32_t)unsigned_value);
+        return decorator(type, std::to_string((int32_t)unsigned_value));
       }
       if (type_string == "long") {
         uint64_t unsigned_value;
         if (!android::base::ParseUint<uint64_t>(value_, &unsigned_value)) goto parse_error;
-        return std::to_string((int64_t)unsigned_value);
+        return decorator(type, std::to_string((int64_t)unsigned_value));
       }
       goto mismatch_error;
     case AidlConstantValue::Type::INTEGRAL:
       if (type_string == "byte") {
         if (!android::base::ParseInt<int8_t>(value_, nullptr)) goto parse_error;
-        return value_;
+        return decorator(type, value_);
       }
       if (type_string == "int") {
         if (!android::base::ParseInt<int32_t>(value_, nullptr)) goto parse_error;
-        return value_;
+        return decorator(type, value_);
       }
       if (type_string == "long") {
         if (!android::base::ParseInt<int64_t>(value_, nullptr)) goto parse_error;
-        return value_;
+        return decorator(type, value_);
       }
       goto mismatch_error;
     case AidlConstantValue::Type::STRING:
-      if (type_string == "String") return value_;
+      if (type_string == "String") return decorator(type, value_);
       goto mismatch_error;
     default:
       AIDL_FATAL(this) << "Unrecognized constant value type";
   }
 
 mismatch_error:
-  AIDL_ERROR(this) << "Type is declared " << type_string << " but constant is " << ToString(type_);
+  AIDL_ERROR(this) << "Expecting type " << type_string << " but constant is " << ToString(type_);
   return "";
 parse_error:
   AIDL_ERROR(this) << "Could not parse " << value_ << " as " << type_string;
@@ -416,6 +462,8 @@ parse_error:
 
 string AidlConstantValue::ToString(Type type) {
   switch (type) {
+    case Type::ARRAY:
+      return "a literal array";
     case Type::BOOLEAN:
       return "a literal boolean";
     case Type::CHARACTER:
@@ -453,7 +501,7 @@ bool AidlConstantDeclaration::CheckValid() const {
     return false;
   }
 
-  return !ValueString().empty();
+  return !ValueString(AidlConstantValueDecorator).empty();
 }
 
 AidlMethod::AidlMethod(const AidlLocation& location, bool oneway, AidlTypeSpecifier* type,

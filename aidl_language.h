@@ -18,6 +18,7 @@ typedef yy_buffer_state* YY_BUFFER_STATE;
 
 using android::aidl::AidlTypenames;
 using android::aidl::CodeWriter;
+using std::shared_ptr;
 using std::string;
 using std::unique_ptr;
 using std::vector;
@@ -64,7 +65,11 @@ std::ostream& operator<<(std::ostream& os, const AidlLocation& l);
 class AidlNode {
  public:
   AidlNode(const AidlLocation& location);
+
+  AidlNode(const AidlNode&) = default;
+  AidlNode(AidlNode&&) = default;
   virtual ~AidlNode() = default;
+  AidlNode& operator=(const AidlNode&) = default;
 
   // DO NOT ADD. This is intentionally omitted. Nothing should refer to the location
   // for a functional purpose. It is only for error messages.
@@ -75,8 +80,6 @@ class AidlNode {
 
  private:
   const AidlLocation location_;
-
-  DISALLOW_COPY_AND_ASSIGN(AidlNode);
 };
 
 // Generic point for printing any error in the AIDL compiler.
@@ -108,6 +111,8 @@ class AidlError {
 
 #define AIDL_ERROR(CONTEXT) ::AidlError(false /*fatal*/, (CONTEXT)).os_
 #define AIDL_FATAL(CONTEXT) ::AidlError(true /*fatal*/, (CONTEXT)).os_
+#define AIDL_FATAL_IF(CONDITION, CONTEXT) \
+  if (CONDITION) AIDL_FATAL(CONTEXT) << "Bad internal state: " << #CONDITION << ": "
 
 namespace android {
 namespace aidl {
@@ -122,7 +127,11 @@ class AidlAnnotation : public AidlNode {
  public:
   static AidlAnnotation* Parse(const AidlLocation& location, const string& name);
 
+  AidlAnnotation(const AidlAnnotation&) = default;
+  AidlAnnotation(AidlAnnotation&&) = default;
   virtual ~AidlAnnotation() = default;
+  AidlAnnotation& operator=(const AidlAnnotation&) = default;
+
   const string& GetName() const { return name_; }
   string ToString() const { return "@" + name_; }
 
@@ -131,30 +140,32 @@ class AidlAnnotation : public AidlNode {
   const string name_;
 };
 
-bool operator==(const unique_ptr<AidlAnnotation>& lhs,
-                const unique_ptr<AidlAnnotation>& rhs);
+static inline bool operator<(const AidlAnnotation& lhs, const AidlAnnotation& rhs) {
+  return lhs.GetName() < rhs.GetName();
+}
+static inline bool operator==(const AidlAnnotation& lhs, const AidlAnnotation& rhs) {
+  return lhs.GetName() == rhs.GetName();
+}
 
 class AidlAnnotatable : public AidlNode {
  public:
   AidlAnnotatable(const AidlLocation& location);
-  virtual ~AidlAnnotatable() = default;
 
-  void Annotate(set<unique_ptr<AidlAnnotation>>&& annotations) {
-    annotations_ = std::move(annotations);
-  }
+  AidlAnnotatable(const AidlAnnotatable&) = default;
+  AidlAnnotatable(AidlAnnotatable&&) = default;
+  virtual ~AidlAnnotatable() = default;
+  AidlAnnotatable& operator=(const AidlAnnotatable&) = default;
+
+  void Annotate(set<AidlAnnotation>&& annotations) { annotations_ = std::move(annotations); }
   bool IsNullable() const;
   bool IsUtf8() const;
   bool IsUtf8InCpp() const;
   std::string ToString() const;
 
-  const set<unique_ptr<AidlAnnotation>>& GetAnnotations() const {
-    return annotations_;
-  }
+  const set<AidlAnnotation>& GetAnnotations() const { return annotations_; }
 
  private:
-  set<unique_ptr<AidlAnnotation>> annotations_;
-
-  DISALLOW_COPY_AND_ASSIGN(AidlAnnotatable);
+  set<AidlAnnotation> annotations_;
 };
 
 class AidlQualifiedName;
@@ -166,6 +177,9 @@ class AidlTypeSpecifier final : public AidlAnnotatable {
   AidlTypeSpecifier(const AidlLocation& location, const string& unresolved_name, bool is_array,
                     vector<unique_ptr<AidlTypeSpecifier>>* type_params, const string& comments);
   virtual ~AidlTypeSpecifier() = default;
+
+  // Copy of this type which is not an array.
+  AidlTypeSpecifier ArrayBase() const;
 
   // Returns the full-qualified name of the base type.
   // int -> int
@@ -213,15 +227,23 @@ class AidlTypeSpecifier final : public AidlAnnotatable {
     return reinterpret_cast<const T*>(language_type_);
   }
  private:
+  AidlTypeSpecifier(const AidlTypeSpecifier&) = default;
+
   const string unresolved_name_;
   string fully_qualified_name_;
-  const bool is_array_;
-  const unique_ptr<vector<unique_ptr<AidlTypeSpecifier>>> type_params_;
+  bool is_array_;
+  const shared_ptr<vector<unique_ptr<AidlTypeSpecifier>>> type_params_;
   const string comments_;
   const android::aidl::ValidatableType* language_type_ = nullptr;
-
-  DISALLOW_COPY_AND_ASSIGN(AidlTypeSpecifier);
 };
+
+// Transforms a value string into a language specific form. Raw value as produced by
+// AidlConstantValue.
+using ConstantValueDecorator =
+    std::function<std::string(const AidlTypeSpecifier& type, const std::string& raw_value)>;
+
+// Returns the universal value unaltered.
+std::string AidlConstantValueDecorator(const AidlTypeSpecifier& type, const std::string& raw_value);
 
 class AidlConstantValue;
 class AidlVariableDeclaration : public AidlNode {
@@ -242,7 +264,7 @@ class AidlVariableDeclaration : public AidlNode {
   std::string ToString() const;
   std::string Signature() const;
 
-  std::string ValueString() const;
+  std::string ValueString(const ConstantValueDecorator& decorator) const;
 
  private:
   std::unique_ptr<AidlTypeSpecifier> type_;
@@ -293,7 +315,7 @@ class AidlMember : public AidlNode {
 
 class AidlConstantValue : public AidlNode {
  public:
-  enum class Type { ERROR, BOOLEAN, CHARACTER, FLOATING, HEXIDECIMAL, INTEGRAL, STRING };
+  enum class Type { ERROR, ARRAY, BOOLEAN, CHARACTER, FLOATING, HEXIDECIMAL, INTEGRAL, STRING };
 
   virtual ~AidlConstantValue() = default;
 
@@ -304,20 +326,27 @@ class AidlConstantValue : public AidlNode {
   static AidlConstantValue* Hex(const AidlLocation& location, const std::string& value);
   // example: 123, -5498, maybe any size
   static AidlConstantValue* Integral(const AidlLocation& location, const std::string& value);
+  static AidlConstantValue* Array(const AidlLocation& location,
+                                  std::vector<std::unique_ptr<AidlConstantValue>>* values);
   // example: "\"asdf\""
   static AidlConstantValue* String(const AidlLocation& location, const std::string& value);
 
   Type GetType() const { return type_; }
 
   bool CheckValid() const;
-  string As(const AidlTypeSpecifier& type) const;
+
+  // Raw value of type (currently valid in C++ and Java). Empty string on error.
+  string As(const AidlTypeSpecifier& type, const ConstantValueDecorator& decorator) const;
 
  private:
   AidlConstantValue(const AidlLocation& location, Type type, const std::string& checked_value);
+  AidlConstantValue(const AidlLocation& location, Type type,
+                    std::vector<std::unique_ptr<AidlConstantValue>>* values);
   static string ToString(Type type);
 
   const Type type_ = Type::ERROR;
-  const std::string value_;
+  const std::vector<std::unique_ptr<AidlConstantValue>> values_;  // if type_ == ARRAY
+  const std::string value_;                                       // otherwise
 
   DISALLOW_COPY_AND_ASSIGN(AidlConstantValue);
 };
@@ -333,7 +362,9 @@ class AidlConstantDeclaration : public AidlMember {
   const AidlConstantValue& GetValue() const { return *value_; }
   bool CheckValid() const;
 
-  string ValueString() const { return GetValue().As(GetType()); }
+  string ValueString(const ConstantValueDecorator& decorator) const {
+    return GetValue().As(GetType(), decorator);
+  }
 
   AidlConstantDeclaration* AsConstantDeclaration() override { return this; }
 

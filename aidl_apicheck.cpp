@@ -99,6 +99,32 @@ static bool are_compatible_interfaces(const AidlInterface& older, const AidlInte
       }
     }
   }
+
+  map<string, AidlConstantDeclaration*> new_constdecls;
+  for (const auto& c : newer.AsInterface()->GetConstantDeclarations()) {
+    new_constdecls.emplace(c->GetName(), c.get());
+  }
+
+  for (const auto& old_c : older.AsInterface()->GetConstantDeclarations()) {
+    const auto found = new_constdecls.find(old_c->GetName());
+    if (found == new_constdecls.end()) {
+      AIDL_ERROR(old_c) << "Removed constant declaration: " << older.GetCanonicalName() << "."
+                        << old_c->GetName();
+      compatible = false;
+      continue;
+    }
+
+    const auto new_c = found->second;
+    compatible &= are_compatible_types(old_c->GetType(), new_c->GetType());
+
+    const string old_value = old_c->ValueString(AidlConstantValueDecorator);
+    const string new_value = new_c->ValueString(AidlConstantValueDecorator);
+    if (old_value != new_value) {
+      AIDL_ERROR(newer) << "Changed constant value: " << older.GetCanonicalName() << "."
+                        << old_c->GetName() << " from " << old_value << " to " << new_value << ".";
+      compatible = false;
+    }
+  }
   return compatible;
 }
 
@@ -115,14 +141,23 @@ static bool are_compatible_parcelables(const AidlStructuredParcelable& older,
 
   bool compatible = true;
   for (size_t i = 0; i < old_fields.size(); i++) {
-    compatible &= are_compatible_types(old_fields.at(i)->GetType(), new_fields.at(i)->GetType());
+    const auto& old_field = old_fields.at(i);
+    const auto& new_field = new_fields.at(i);
+    compatible &= are_compatible_types(old_field->GetType(), new_field->GetType());
 
     // Note: unlike method argument names, field name change is an incompatible
     // change, otherwise, we can't detect
     // parcelable Point {int x; int y;} -> parcelable Point {int y; int x;}
-    if (old_fields.at(i)->GetName() != new_fields.at(i)->GetName()) {
-      AIDL_ERROR(newer) << "Renamed field: " << old_fields.at(i)->GetName() << " to "
-                        << new_fields.at(i)->GetName() << ".";
+    if (old_field->GetName() != new_field->GetName()) {
+      AIDL_ERROR(newer) << "Renamed field: " << old_field->GetName() << " to "
+                        << new_field->GetName() << ".";
+      compatible = false;
+    }
+
+    const string old_value = old_field->ValueString(AidlConstantValueDecorator);
+    const string new_value = new_field->ValueString(AidlConstantValueDecorator);
+    if (old_value != new_value) {
+      AIDL_ERROR(newer) << "Changed default value: " << old_value << " to " << new_value << ".";
       compatible = false;
     }
   }

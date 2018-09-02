@@ -506,12 +506,14 @@ TEST_F(AidlTest, ApiDump) {
       "    int foo2(@utf8InCpp String x, inout List<String>  y);\n"
       "    IFoo foo3(IFoo foo);\n"
       "    Data getData();\n"
+      "    const int A = 1;\n"
+      "    const String STR = \"Hello\";\n"
       "}\n");
   io_delegate_.SetFileContents("foo/bar/Data.aidl",
                                "package foo.bar;\n"
                                "import foo.bar.IFoo;\n"
                                "parcelable Data {\n"
-                               "   int x;\n"
+                               "   int x = 10;\n"
                                "   int y;\n"
                                "   IFoo foo;\n"
                                "   List<IFoo> a;\n"
@@ -531,7 +533,7 @@ TEST_F(AidlTest, ApiDump) {
   EXPECT_TRUE(io_delegate_.GetWrittenContents("api.aidl", &actual));
   EXPECT_EQ(actual, R"(package foo.bar {
   parcelable Data {
-    int x;
+    int x = 10;
     int y;
     foo.bar.IFoo foo;
     List<foo.bar.IFoo> a;
@@ -543,6 +545,8 @@ TEST_F(AidlTest, ApiDump) {
     int foo2(@utf8InCpp String x, inout List<String> y);
     foo.bar.IFoo foo3(foo.bar.IFoo foo);
     foo.bar.Data getData();
+    const int A = 1;
+    const String STR = "Hello";
   }
 
 }
@@ -695,14 +699,6 @@ TEST_F(AidlTest, ConflictWithMetaTransactions) {
   EXPECT_EQ(0, ::android::aidl::compile_aidl(options, io_delegate_));
 }
 
-TEST_F(AidlTest, RejectsApiDumpFileForCompilation) {
-  Options options = Options::From("aidl --lang=java -o out p/IFoo.aidl");
-  io_delegate_.SetFileContents(options.InputFiles().front(),
-                               "package p {"
-                               "interface IFoo { int getFoo(); }}");
-  EXPECT_NE(0, ::android::aidl::compile_aidl(options, io_delegate_));
-}
-
 TEST_F(AidlTest, RejectsSourceFileForApiCheck) {
   Options options = Options::From("aidl --checkapi p/IFoo.aidl p/IBar.aidl");
   io_delegate_.SetFileContents("p/IFoo.aidl", "package p; interface IFoo{}");
@@ -807,6 +803,22 @@ TEST_F(AidlTest, SuccessOnCompatibleChanges) {
                                "  int foo;"
                                "}"
                                "}");
+  EXPECT_TRUE(::android::aidl::check_api(options, io_delegate_));
+
+  // added const value
+  io_delegate_.SetFileContents("old.aidl", "package p { interface I { const int A = 1; }}");
+  io_delegate_.SetFileContents("new.aidl",
+                               "package p { interface I {"
+                               "const int A = 1; const int B = 2;}}");
+  EXPECT_TRUE(::android::aidl::check_api(options, io_delegate_));
+
+  // changed const value order
+  io_delegate_.SetFileContents("old.aidl",
+                               "package p { interface I {"
+                               "const int A = 1; const int B = 2;}}");
+  io_delegate_.SetFileContents("old.aidl",
+                               "package p { interface I {"
+                               "const int B = 2; const int A = 1;}}");
   EXPECT_TRUE(::android::aidl::check_api(options, io_delegate_));
 }
 
@@ -978,6 +990,52 @@ TEST_F(AidlTest, FailOnIncompatibleChanges) {
                                "package q { interface IFoo{}}");
   io_delegate_.SetFileContents("new.aidl", "package p { interface IFoo{}}");
   EXPECT_FALSE(::android::aidl::check_api(options, io_delegate_));
+
+  // changed default value
+  io_delegate_.SetFileContents("old.aidl", "package p { parcelable D { int a = 1; }}");
+  io_delegate_.SetFileContents("new.aidl", "package p { parcelable D { int a = 2; }}");
+  EXPECT_FALSE(::android::aidl::check_api(options, io_delegate_));
+
+  // removed const value
+  io_delegate_.SetFileContents("old.aidl",
+                               "package p { interface I {"
+                               "const int A = 1; const int B = 2;}}");
+  io_delegate_.SetFileContents("new.aidl", "package p { interface I { const int A = 1; }}");
+  EXPECT_FALSE(::android::aidl::check_api(options, io_delegate_));
+
+  // changed const value
+  io_delegate_.SetFileContents("old.aidl", "package p { interface I { const int A = 1; }}");
+  io_delegate_.SetFileContents("new.aidl", "package p { interface I { const int A = 2; }}");
+  EXPECT_FALSE(::android::aidl::check_api(options, io_delegate_));
+}
+
+TEST_F(AidlTest, CompileApiDumpJava) {
+  Options options = Options::From("aidl --lang=java -o out -m otherdump.aidl mydump.aidl");
+  io_delegate_.SetFileContents("mydump.aidl",
+                               "package p {interface IFoo { void foo(in q.IBar a);}}");
+  io_delegate_.SetFileContents("otherdump.aidl", "package q {interface IBar{ }}");
+
+  EXPECT_EQ(0, ::android::aidl::compile_aidl(options, io_delegate_));
+  EXPECT_TRUE(io_delegate_.GetWrittenContents("out/p/IFoo.java", nullptr));
+  EXPECT_FALSE(io_delegate_.GetWrittenContents("out/q/IBar.java", nullptr));
+}
+
+TEST_F(AidlTest, CompileApiDumpCpp) {
+  Options options =
+      Options::From("aidl --lang=cpp -o out -h out/include -m otherdump.aidl mydump.aidl");
+  io_delegate_.SetFileContents("mydump.aidl",
+                               "package p {interface IFoo { void foo(in q.IBar a);}}");
+  io_delegate_.SetFileContents("otherdump.aidl", "package q {interface IBar{ }}");
+
+  EXPECT_EQ(0, ::android::aidl::compile_aidl(options, io_delegate_));
+  EXPECT_TRUE(io_delegate_.GetWrittenContents("out/include/p/IFoo.h", nullptr));
+  EXPECT_TRUE(io_delegate_.GetWrittenContents("out/include/p/BnFoo.h", nullptr));
+  EXPECT_TRUE(io_delegate_.GetWrittenContents("out/include/p/BpFoo.h", nullptr));
+  EXPECT_TRUE(io_delegate_.GetWrittenContents("out/p/IFoo.cpp", nullptr));
+  EXPECT_FALSE(io_delegate_.GetWrittenContents("out/include/q/IBar.h", nullptr));
+  EXPECT_FALSE(io_delegate_.GetWrittenContents("out/include/q/BnBar.h", nullptr));
+  EXPECT_FALSE(io_delegate_.GetWrittenContents("out/include/q/BpBar.h", nullptr));
+  EXPECT_FALSE(io_delegate_.GetWrittenContents("out/q/IBar.cpp", nullptr));
 }
 
 }  // namespace aidl

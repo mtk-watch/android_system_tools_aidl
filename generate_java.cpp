@@ -227,7 +227,7 @@ android::aidl::java::Class* generate_parcel_class(const AidlStructuredParcelable
   describe_contents_method->returnType = types->IntType();
   describe_contents_method->name = "describeContents";
   describe_contents_method->statements = new StatementBlock();
-  describe_contents_method->statements->Add(new LiteralStatement("return 0;"));
+  describe_contents_method->statements->Add(new LiteralStatement("return 0;\n"));
   parcel_class->elements.push_back(describe_contents_method);
 
   return parcel_class;
@@ -237,6 +237,9 @@ std::vector<std::string> generate_java_annotations(const AidlAnnotatable& a) {
   std::vector<std::string> result;
   if (a.IsUnsupportedAppUsage()) {
     result.emplace_back("@android.annotation.UnsupportedAppUsage");
+  }
+  if (a.IsSystemApi()) {
+    result.emplace_back("@android.annotation.SystemApi");
   }
   return result;
 }

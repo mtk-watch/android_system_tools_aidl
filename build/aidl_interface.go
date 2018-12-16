@@ -694,7 +694,6 @@ func addCppLibrary(mctx android.LoadHookContext, i *aidlInterface, version strin
 		importExportDependencies = append(importExportDependencies, "libbinder_ndk")
 		sdkVersion = proptools.StringPtr("current")
 		stl = proptools.StringPtr("c++_shared")
-		cpp_std = proptools.StringPtr("c++17")
 	} else {
 		panic("Unrecognized language: " + lang)
 	}
@@ -712,6 +711,7 @@ func addCppLibrary(mctx android.LoadHookContext, i *aidlInterface, version strin
 		Sdk_version:               sdkVersion,
 		Stl:                       stl,
 		Cpp_std:                   cpp_std,
+		Cflags:                    []string{"-Wextra", "-Wall", "-Werror"},
 	}, &i.properties.VndkProperties)
 
 	return cppModuleGen

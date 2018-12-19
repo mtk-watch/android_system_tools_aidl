@@ -585,7 +585,8 @@ string AidlMethod::ToString() const {
   for (const auto& arg : GetArguments()) {
     arg_strings.emplace_back(arg->Signature());
   }
-  string ret = GetType().Signature() + " " + GetName() + "(" + Join(arg_strings, ", ") + ")";
+  string ret = (IsOneway() ? "oneway " : "") + GetType().Signature() + " " + GetName() + "(" +
+               Join(arg_strings, ", ") + ")";
   if (HasId()) {
     ret += " = " + std::to_string(GetId());
   }
@@ -663,7 +664,7 @@ AidlInterface::AidlInterface(const AidlLocation& location, const std::string& na
     CHECK(method == nullptr || constant == nullptr);
 
     if (method) {
-      method->SetInterfaceOneway(oneway);
+      method->ApplyInterfaceOneway(oneway);
       methods_.emplace_back(method);
     } else if (constant) {
       constants_.emplace_back(constant);

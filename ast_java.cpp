@@ -100,19 +100,16 @@ void StringLiteralExpression::Write(CodeWriter* to) const {
   to->Write("\"%s\"", this->value.c_str());
 }
 
-Variable::Variable(const Type* t, const string& n)
-    : type(t), name(n), dimension(0) {}
+Variable::Variable(const string& t, const string& n) : type(t), name(n), dimension(0) {}
 
-Variable::Variable(const Type* t, const string& n, int d)
-    : type(t), name(n), dimension(d) {}
+Variable::Variable(const string& t, const string& n, int d) : type(t), name(n), dimension(d) {}
 
 void Variable::WriteDeclaration(CodeWriter* to) const {
   string dim;
   for (int i = 0; i < this->dimension; i++) {
     dim += "[]";
   }
-  to->Write("%s%s %s", this->type->JavaType().c_str(), dim.c_str(),
-            this->name.c_str());
+  to->Write("%s%s %s", this->type.c_str(), dim.c_str(), this->name.c_str());
 }
 
 void Variable::Write(CodeWriter* to) const { to->Write("%s", name.c_str()); }
@@ -269,19 +266,6 @@ void NewArrayExpression::Write(CodeWriter* to) const {
   to->Write("]");
 }
 
-Ternary::Ternary(Expression* a, Expression* b, Expression* c)
-    : condition(a), ifpart(b), elsepart(c) {}
-
-void Ternary::Write(CodeWriter* to) const {
-  to->Write("((");
-  this->condition->Write(to);
-  to->Write(")?(");
-  this->ifpart->Write(to);
-  to->Write("):(");
-  this->elsepart->Write(to);
-  to->Write("))");
-}
-
 Cast::Cast(const Type* t, Expression* e) : type(t), expression(e) {}
 
 void Cast::Write(CodeWriter* to) const {
@@ -334,19 +318,6 @@ void TryStatement::Write(CodeWriter* to) const {
   this->statements->Write(to);
 }
 
-CatchStatement::CatchStatement(Variable* e)
-    : statements(new StatementBlock), exception(e) {}
-
-void CatchStatement::Write(CodeWriter* to) const {
-  to->Write("catch ");
-  if (this->exception != nullptr) {
-    to->Write("(");
-    this->exception->WriteDeclaration(to);
-    to->Write(") ");
-  }
-  this->statements->Write(to);
-}
-
 void FinallyStatement::Write(CodeWriter* to) const {
   to->Write("finally ");
   this->statements->Write(to);
@@ -385,8 +356,6 @@ void SwitchStatement::Write(CodeWriter* to) const {
   to->Dedent();
   to->Write("}\n");
 }
-
-void Break::Write(CodeWriter* to) const { to->Write("break;\n"); }
 
 void Method::Write(CodeWriter* to) const {
   size_t N, i;
@@ -442,16 +411,6 @@ void Method::Write(CodeWriter* to) const {
 
 void LiteralClassElement::Write(CodeWriter* to) const {
   to->Write("%s", element.c_str());
-}
-
-void IntConstant::Write(CodeWriter* to) const {
-  WriteModifiers(to, STATIC | FINAL | PUBLIC, ALL_MODIFIERS);
-  to->Write("int %s = %s;\n", name.c_str(), value.c_str());
-}
-
-void StringConstant::Write(CodeWriter* to) const {
-  WriteModifiers(to, STATIC | FINAL | PUBLIC, ALL_MODIFIERS);
-  to->Write("String %s = %s;\n", name.c_str(), value.c_str());
 }
 
 void Class::Write(CodeWriter* to) const {

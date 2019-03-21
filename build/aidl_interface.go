@@ -154,7 +154,8 @@ func (g *aidlGenRule) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	// input = <module_root>/some_dir/pkg/to/IFoo.aidl
 	// outDir = out/soong/.intermediate/..../gen/
 	// outFile = out/soong/.intermediates/..../gen/pkg/to/IFoo.{java|cpp}
-	input := android.PathForModuleSrc(ctx, g.properties.Input).WithSubDir(ctx, g.properties.AidlRoot)
+	input := android.PathForModuleSrc(ctx, g.properties.Input)
+	input = android.PathWithModuleSrcSubDir(ctx, input, g.properties.AidlRoot)
 	outDir := android.PathForModuleGen(ctx)
 	var outFile android.WritablePath
 	if g.properties.Lang == langJava {
@@ -168,7 +169,7 @@ func (g *aidlGenRule) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	var checkApiTimestamps android.Paths
 	ctx.VisitDirectDeps(func(dep android.Module) {
 		if importedAidl, ok := dep.(*aidlInterface); ok {
-			importPaths = append(importPaths, importedAidl.properties.Full_import_path)
+			importPaths = append(importPaths, importedAidl.properties.Full_import_paths...)
 		} else if api, ok := dep.(*aidlApi); ok {
 			// When compiling an AIDL interface, also make sure that each
 			// version of the interface is compatible with its previous version
@@ -327,14 +328,15 @@ func (m *aidlApi) createApiDumpFromSource(ctx android.ModuleContext) (apiDir and
 	var importPaths []string
 	ctx.VisitDirectDeps(func(dep android.Module) {
 		if importedAidl, ok := dep.(*aidlInterface); ok {
-			importPaths = append(importPaths, importedAidl.properties.Full_import_path)
+			importPaths = append(importPaths, importedAidl.properties.Full_import_paths...)
 		}
 	})
 
 	var srcs android.Paths
 	for _, input := range m.properties.Inputs {
-		srcs = append(srcs, android.PathForModuleSrc(ctx, input).WithSubDir(
-			ctx, m.properties.AidlRoot))
+		path := android.PathForModuleSrc(ctx, input)
+		path = android.PathWithModuleSrcSubDir(ctx, path, m.properties.AidlRoot)
+		srcs = append(srcs, path)
 	}
 
 	apiDir = android.PathForModuleOut(ctx, "dump")
@@ -408,7 +410,7 @@ func (m *aidlApi) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	for _, ver := range m.properties.Versions {
 		apiDir := android.PathForModuleSrc(ctx, m.apiDir(), ver)
 		apiDirs[ver] = apiDir
-		apiFiles[ver] = ctx.Glob(apiDir.Join(ctx, "**/*.aidl").String(), nil)
+		apiFiles[ver] = ctx.Glob(filepath.Join(apiDir.String(), "**/*.aidl"), nil)
 	}
 	apiDirs[currentVersion] = currentDumpDir
 	apiFiles[currentVersion] = currentApiFiles.Paths()
@@ -452,7 +454,9 @@ type aidlInterfaceProperties struct {
 
 	// Whether the library can be installed on the vendor image.
 	Vendor_available *bool
-
+	// Top level directories for includes.
+	// TODO(b/128940869): remove it if aidl_interface can depend on framework.aidl
+	Include_dirs []string
 	// Relative path for includes. By default assumes AIDL path is relative to current directory.
 	// TODO(b/111117220): automatically compute by letting AIDL parse multiple files simultaneously
 	Local_include_dir string
@@ -466,7 +470,7 @@ type aidlInterfaceProperties struct {
 	Imports []string
 
 	// Used by gen dependency to fill out aidl include path
-	Full_import_path string `blueprint:"mutated"`
+	Full_import_paths []string `blueprint:"mutated"`
 
 	// Directory where API dumps are. Default is "api".
 	Api_dir *string
@@ -618,8 +622,11 @@ func aidlInterfaceHook(mctx android.LoadHookContext, i *aidlInterface) {
 	if !isRelativePath(i.properties.Local_include_dir) {
 		mctx.PropertyErrorf("local_include_dir", "must be relative path: "+i.properties.Local_include_dir)
 	}
+	var importPaths []string
+	importPaths = append(importPaths, filepath.Join(mctx.ModuleDir(), i.properties.Local_include_dir))
+	importPaths = append(importPaths, i.properties.Include_dirs...)
 
-	i.properties.Full_import_path = filepath.Join(mctx.ModuleDir(), i.properties.Local_include_dir)
+	i.properties.Full_import_paths = importPaths
 
 	i.checkAndUpdateSources(mctx)
 	i.checkImports(mctx)
